@@ -822,6 +822,10 @@ class Baidu:
             rs2 = self.list_share_all(share_url, pwd, sub_path)
             if rs2["ok"] and rs2["list"]:
                 share_file_list = rs2["list"]
+            else:
+                # 子目录列表失败时直接跳过（下次重试），不要回退成整目录转存，否则会在 savepath 下套出一层同名目录
+                print(f"⚠️ 子目录 {sub_path} 列表失败，本次跳过，下次重试")
+                return tree
         # 2. 目标目录
         savepath_rel = re.sub(r"/{2,}", "/", f"/{task['savepath']}{subdir_path}").strip("/")
         if not self.ensure_dir(savepath_rel):
