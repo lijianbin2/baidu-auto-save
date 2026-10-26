@@ -1,0 +1,56 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Baidu-Auto-Save</title>
+<style>body{font-family:sans-serif;max-width:1000px;margin:20px auto;padding:0 12px}textarea{width:100%;height:420px;font-family:monospace}button{padding:6px 14px;margin:4px}pre{background:#111;color:#0f0;padding:10px;white-space:pre-wrap;max-height:300px;overflow:auto}.row{display:flex;gap:8px;flex-wrap:wrap}input{padding:6px}</style>
+</head><body>
+<h2>☁️ Baidu-Auto-Save（百度网盘自动转存）</h2>
+<div id="acct">账号状态加载中…</div>
+<div class="row">
+<button onclick="loadData()">🔄 刷新配置</button>
+<button onclick="saveData()">💾 保存配置</button>
+<button onclick="runNow()">🚀 立即执行</button>
+<button onclick="logout()">退出</button>
+</div>
+<h3>任务配置（baidu_config.json）</h3>
+<textarea id="cfg"></textarea>
+<div class="row">
+<input id="shareurl" placeholder="分享链接 https://pan.baidu.com/s/..." size="45">
+<input id="pwd" placeholder="提取码（可选）" size="10">
+<button onclick="queryShare()">查询分享</button>
+<input id="savepath" placeholder="网盘目录 如 /追剧/xxx" size="20">
+<button onclick="queryDir()">查看目录</button>
+</div>
+<pre id="out">就绪。保存目录一律位于「我的应用数据/bdpan/」下，配置里写 /追剧/xxx 即可。</pre>
+<script>
+let raw = "";
+async function loadData(){
+  const r = await fetch("/data"); const j = await r.json();
+  if(!j.ok){ location.href="/login"; return; }
+  raw = JSON.stringify(j.config, null, 2);
+  document.getElementById("cfg").value = raw;
+  document.getElementById("acct").textContent = j.account.active ? `✅ 已登录：${j.account.nickname||""} 定时：${j.cron}` : "❌ 未登录：请 docker exec -it baidu-auto-save bdpan login 完成登录";
+}
+async function saveData(){
+  const r = await fetch("/update", {method:"POST", headers:{"Content-Type":"application/json"}, body: document.getElementById("cfg").value});
+  document.getElementById("out").textContent = r.ok ? "✅ 已保存" : "❌ 保存失败：请检查 JSON 格式";
+}
+async function runNow(){
+  const o = document.getElementById("out"); o.textContent = "";
+  const r = await fetch("/run_script_now", {method:"POST"});
+  const rd = r.body.getReader(); const dec = new TextDecoder();
+  while(true){ const {done, value} = await rd.read(); if(done) break; o.textContent += dec.decode(value); o.scrollTop = 1e9; }
+}
+async function queryShare(){
+  const o = document.getElementById("out");
+  const r = await fetch("/get_share_detail", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({shareurl: document.getElementById("shareurl").value, pwd: document.getElementById("pwd").value})});
+  const j = await r.json();
+  o.textContent = JSON.stringify(j, null, 2).slice(0, 4000);
+}
+async function queryDir(){
+  const o = document.getElementById("out");
+  const r = await fetch("/get_savepath_detail?path="+encodeURIComponent(document.getElementById("savepath").value));
+  const j = await r.json();
+  o.textContent = JSON.stringify(j, null, 2).slice(0, 4000);
+}
+async function logout(){ await fetch("/logout"); location.href="/login"; }
+loadData();
+</script></body></html>

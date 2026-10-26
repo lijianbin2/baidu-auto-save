@@ -1,0 +1,17 @@
+name: baidu-auto-save
+services:
+  baidu-auto-save:
+    build: .
+    container_name: baidu-auto-save
+    network_mode: bridge
+    ports:
+      - "5006:5006"
+    environment:
+      WEBUI_USERNAME: "admin"
+      WEBUI_PASSWORD: "admin123"
+      PORT: "5006"
+      CRON: "0 8,18,20 * * *"
+      TASK_TIMEOUT: "1800"
+    volumes:
+      - ./config:/app/config
+    restart: unless-stopped

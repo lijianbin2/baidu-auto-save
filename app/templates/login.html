@@ -1,0 +1,13 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>登录 - Baidu-Auto-Save</title></head>
+<body style="font-family:sans-serif;max-width:420px;margin:60px auto">
+<h2>🔐 Baidu-Auto-Save 登录</h2>
+<form id="f">账号 <input name="username" value="admin"><br><br>密码 <input name="password" type="password"><br><br><button>登录</button></form>
+<p id="m"></p>
+<script>
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const r = await fetch("/login", {method: "POST", body: new URLSearchParams(fd)});
+  if (r.ok) location.href = "/"; else document.getElementById("m").textContent = "登录失败";
+};
+</script></body></html>

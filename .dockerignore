@@ -1,0 +1,3 @@
+config/.bdpan/
+__pycache__/
+*.pyc
