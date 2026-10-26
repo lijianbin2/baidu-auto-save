@@ -584,7 +584,9 @@ class Baidu:
     def list_share(self, share_url, pwd="", source_dir="", page=1, page_size=100):
         args = ["transfer", "list", share_url, "--page", str(page), "--page-size", str(page_size), "--json"]
         if source_dir:
-            args += ["--source-dir", source_dir]
+            # bdpan 要求 source-dir 为空或以 / 开头，否则取子目录失败；调用处传的是相对路径，这里统一规范化
+            sd = "/" + source_dir.strip().strip("/")
+            args += ["--source-dir", sd if sd != "/" else ""]
         if pwd:
             args += ["-p", pwd]
         ret = self._run(args, timeout=120)
