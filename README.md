@@ -13,7 +13,7 @@
 - `enddate` 到期停跑、`runweek` 指定星期几跑
 - 已转存跳过、`ignore_extension` 忽略后缀、`update_subdir` 指定子目录更新
 - 定时执行（`CRON`）、WebUI 管理配置、一键执行、分享/目录预览
-- 推送复用 `notify.py`（夸克版同款多渠道）
+- 推送：PushPlus（页面填 Token，一键测试，微信收通知）
 
 ## 快速开始（docker compose）
 
@@ -23,7 +23,11 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-打开 `http://你的IP:5006`，默认账号 `admin / admin123`（compose 里改）。
+打开 `http://你的IP:5006`。账号密码在 `.env` 里改（照 `.env.example` 复制一份）：
+
+```bash
+cp .env.example .env  # 然后编辑 .env 设强密码
+```
 
 ## 登录（必须，容器内执行一次）
 
@@ -62,7 +66,7 @@ docker exec -it baidu-auto-save bdpan login
 | 字段 | 说明 |
 |---|---|
 | `taskname` | 任务名（也会用于 `{TASKNAME}` 重命名） |
-| `shareurl` | 百度分享链接，可带 `?pwd=`，也可把提取码单独填 `pwd` |
+| `shareurl` | 百度分享链接，可带 `?pwd=`，也可把提取码单独填 `pwd`；新版 `share/init?surl=` 链接自动兼容 |
 | `pwd` | 提取码（可选，与链接二选一即可） |
 | `savepath` | 保存目录，写 `/追剧/xxx`，实际落到 bdpan 应用目录下 |
 | `pattern/replace` | 正则过滤+重命名，`$TV_REGEX` 等魔法匹配通用 |
@@ -91,7 +95,7 @@ compose 里 `CRON: "0 8,18,20 * * *"`（分 时 日 月 周）。资源不会每
 ```
 baidu_auto_save.py   主脚本（定时/手动执行）
 app/run.py           WebUI（5006 端口）
-config/              配置+登录持久化（记得备份）
+config/              配置+登录持久化（自动备份到网盘 `_backup/`，保留最近 5 份）
 plugins/             可选插件
 ```
 
@@ -106,5 +110,5 @@ plugins/             可选插件
 与原版 QAS 一致。百度账号支持网页一键登录：点「登录百度网盘」→ 去百度授权 →
 粘回授权码完成，全程不用敲命令。
 
-相对原版 QAS 精简掉的部分（百度版用不上）：通知推送、魔法匹配管理、API Token 展示、
-资源搜索（CloudSaver/PanSou）、插件。
+相对原版 QAS 精简掉的部分（百度版用不上）：魔法匹配管理、API Token 展示、
+资源搜索（CloudSaver/PanSou）、插件管理页。
