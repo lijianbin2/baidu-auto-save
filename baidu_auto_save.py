@@ -316,8 +316,21 @@ class Baidu:
         self.savepath_cache = {}
 
     # ---------- 底层 ----------
+    @staticmethod
+    def _bdpan_bin():
+        import shutil
+        hit = shutil.which("bdpan")
+        if hit:
+            return hit
+        for cand in ("/usr/local/bin/bdpan",
+                     os.path.expanduser("~/.local/bin/bdpan"),
+                     "/root/.local/bin/bdpan"):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+        return "bdpan"
+
     def _run(self, args, timeout=120):
-        cmd = ["bdpan"] + args
+        cmd = [self._bdpan_bin()] + args
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except FileNotFoundError:
@@ -612,7 +625,7 @@ class Baidu:
             return {"ok": False, "err": "授权码为空"}
         try:
             pr = subprocess.run(
-                ["bdpan", "login", "--set-code-stdin", "--accept-disclaimer", "--json"],
+                [self._bdpan_bin(), "login", "--set-code-stdin", "--accept-disclaimer", "--json"],
                 input=(code + "\n"), capture_output=True, text=True, timeout=120)
         except FileNotFoundError:
             return {"ok": False, "err": "未找到 bdpan"}

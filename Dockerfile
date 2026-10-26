@@ -2,6 +2,7 @@ FROM python:3.13-slim
 
 ENV TZ="Asia/Shanghai" \
     PYTHONUNBUFFERED=1 \
+    PATH="/root/.local/bin:${PATH}" \
     BDPAN_CONFIG_DIR=/app/config/.bdpan \
     CONFIG_PATH=/app/config/baidu_config.json \
     SCRIPT_PATH=/app/baidu_auto_save.py
@@ -18,7 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && chmod +x /tmp/bdpan-installer \
  && /tmp/bdpan-installer --yes \
  && rm -f /tmp/bdpan-installer \
- && bdpan version || true
+ && BDPAN_BIN=$(command -v bdpan) \
+ && ln -sf "$BDPAN_BIN" /usr/local/bin/bdpan \
+ && bdpan version
 
 EXPOSE 5006
 CMD ["python", "./app/run.py"]
