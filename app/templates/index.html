@@ -151,7 +151,7 @@
                 <input type="text" class="form-control" v-model="formData.cloud_backup.dir" placeholder="_backup">
               </div>
             </div>
-            <p class="text-muted small">{{ cloudBackupMsg || ('上次备份：' + (formData.cloud_backup.last_backup || '从未备份')) }}。点左上角保存后会自动备份一次；重装/换机后点 <i class="bi bi-cloud-download"></i> 可从云端恢复任务配置。</p>
+            <p class="text-muted small">{{ cloudBackupMsg || ('上次备份：' + (formData.cloud_backup.last_backup || '从未备份')) }}。点左上角保存后会自动备份一次（云端保留最近 5 份）；重装/换机后点 <i class="bi bi-cloud-download"></i> 可从云端恢复任务配置。</p>
 
 
 

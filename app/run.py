@@ -325,8 +325,11 @@ def account_info():
     })
 
 
-# ---------------- 云端备份：设置自动备份到百度网盘 ----------------
-CLOUD_BACKUP_FILE = "baidu_config.json"
+# ---------------- 云端备份：设置自动备份到百度网盘（保留最近 N 份） ----------------
+CLOUD_BACKUP_PREFIX = "baidu_config_"
+CLOUD_BACKUP_SUFFIX = ".json"
+CLOUD_BACKUP_LEGACY = "baidu_config.json"
+CLOUD_BACKUP_KEEP = 5
 CLOUD_BACKUP_DEFAULT_DIR = "_backup"
 
 
@@ -340,39 +343,6 @@ def _ensure_cloud_backup_default():
     cb.setdefault("last_backup", "")
 
 
-def _try_cloud_restore_on_init():
-    """启动时本地无配置文件，尝试从云端拉取备份。返回 True/False"""
-    tmp = ""
-    try:
-        account = Baidu()
-        fd, tmp = tempfile.mkstemp(prefix="baidu_config_init_", suffix=".json")
-        os.close(fd)
-        try:
-            ret = account.run_raw(["download", f"{CLOUD_BACKUP_DEFAULT_DIR}/{CLOUD_BACKUP_FILE}", tmp, "--json"], timeout=120)
-        except Exception:
-            return False
-        if not ret.get("_ok") or ret.get("errno") not in (None, 0):
-            return False
-        try:
-            with open(tmp, "r", encoding="utf-8") as f:
-                data = json.loads(f.read())
-        except Exception:
-            return False
-        if not isinstance(data, dict) or not isinstance(data.get("tasklist"), list):
-            return False
-        Config.write_json(CONFIG_PATH, data)
-        logging.info(">>> 启动时从云端恢复了配置备份")
-        return True
-    except Exception:
-        return False
-    finally:
-        try:
-            if tmp and os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-
-
 def _cloud_backup_conf():
     cb = config_data.get("cloud_backup") or {}
     if not isinstance(cb, dict):
@@ -381,14 +351,61 @@ def _cloud_backup_conf():
     return cb.get("enable", True), (d or CLOUD_BACKUP_DEFAULT_DIR), cb
 
 
-def _cloud_remote_path(remote_dir=None):
-    if not remote_dir:
-        _, remote_dir, _ = _cloud_backup_conf()
-    return f"{remote_dir}/{CLOUD_BACKUP_FILE}"
+def _cloud_list_backups(account, remote_dir):
+    """列出云端备份文件（新版时间戳命名 + 兼容旧版单文件），按 mtime 从新到旧"""
+    ret = account.run_raw(["ls", remote_dir, "--json"], timeout=60)
+    items = []
+    if isinstance(ret.get("_list"), list):
+        items = ret["_list"]
+    elif isinstance(ret.get("list"), list):
+        items = ret["list"]
+    elif isinstance(ret.get("data"), list):
+        items = ret["data"]
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = it.get("server_filename") or it.get("name") or ""
+        if name == CLOUD_BACKUP_LEGACY or (name.startswith(CLOUD_BACKUP_PREFIX) and name.endswith(CLOUD_BACKUP_SUFFIX)):
+            out.append({"remote": f"{remote_dir}/{name}", "name": name,
+                        "mtime": it.get("server_mtime") or it.get("mtime") or "",
+                        "size": it.get("size")})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def _cloud_download_json(account, remote):
+    """从云端下载备份并解析为 dict，返回 (data, err)。data 为 None 表示失败"""
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="baidu_config_dl_", suffix=".json")
+        os.close(fd)
+        try:
+            ret = account.run_raw(["download", remote, tmp, "--json"], timeout=180)
+        except Exception as e:
+            return None, f"下载失败：{e}"
+        if not ret.get("_ok"):
+            return None, f"下载失败：{ret.get('_err', '未知错误')}"
+        if ret.get("errno") not in (None, 0):
+            return None, "云端还没有备份文件（先点左上角保存，或点备份按钮）"
+        try:
+            with open(tmp, "r", encoding="utf-8") as f:
+                data = json.loads(f.read())
+        except Exception:
+            return None, "云端备份文件损坏（不是有效的 JSON）"
+        if not isinstance(data, dict) or not isinstance(data.get("tasklist"), list):
+            return None, "云端备份文件格式不正确"
+        return data, ""
+    finally:
+        try:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 def do_cloud_backup(reason=""):
-    """把磁盘上的配置文件上传到网盘（沙盒内备份目录）。返回 (ok, msg)"""
+    """把磁盘上的配置文件上传到网盘（时间戳命名），只保留最近 KEEP 份。返回 (ok, msg)"""
     try:
         enable, _, _ = _cloud_backup_conf()
         if not enable:
@@ -396,23 +413,46 @@ def do_cloud_backup(reason=""):
         if not os.path.exists(CONFIG_PATH):
             return False, "本地配置文件不存在"
         account = Baidu()
-        remote = _cloud_remote_path()
+        _, remote_dir, _ = _cloud_backup_conf()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        remote = f"{remote_dir}/{CLOUD_BACKUP_PREFIX}{ts}{CLOUD_BACKUP_SUFFIX}"
         ret = account.run_raw(["upload", CONFIG_PATH, remote, "--json"], timeout=120)
         if not ret.get("_ok"):
             return False, f"上传失败：{ret.get('_err', '未知错误')}"
         if ret.get("errno") not in (None, 0):
             return False, Baidu.err_text(ret, "上传失败")
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        # 轮转：只保留最新的 KEEP 份
+        count = 1
+        try:
+            backs = _cloud_list_backups(account, remote_dir)
+            for old in backs[CLOUD_BACKUP_KEEP:]:
+                try:
+                    account.run_raw(["rm", old["remote"], "--json"], timeout=60)
+                except Exception:
+                    pass
+            backs = _cloud_list_backups(account, remote_dir)
+            # 已有多份新版备份后，清理旧版单文件，避免混淆
+            newones = [b for b in backs if b["name"] != CLOUD_BACKUP_LEGACY]
+            if len(newones) >= 2 and any(b["name"] == CLOUD_BACKUP_LEGACY for b in backs):
+                try:
+                    account.run_raw(["rm", f"{remote_dir}/{CLOUD_BACKUP_LEGACY}", "--json"], timeout=60)
+                except Exception:
+                    pass
+                backs = newones
+            count = len(backs) or 1
+        except Exception as e:
+            logging.error(f">>> 备份轮转清理失败：{e}")
+        disp_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         cb = config_data.setdefault("cloud_backup", {})
         if isinstance(cb, dict):
-            cb["last_backup"] = ts
+            cb["last_backup"] = disp_ts
             cb["last_result"] = "ok"
             try:
                 Config.write_json(CONFIG_PATH, config_data)
             except Exception:
                 pass
         logging.info(f">>> 云端备份成功（{reason}）：{remote}")
-        return True, f"已备份到 我的应用数据/bdpan/{remote}（{ts}）"
+        return True, f"已备份（{disp_ts}），云端保留最近 {count} 份"
     except Exception as e:
         logging.error(f">>> 云端备份异常：{e}")
         return False, f"备份异常：{e}"
@@ -430,29 +470,17 @@ def _fire_cloud_backup(reason=""):
 
 
 def do_cloud_restore():
-    """从网盘下载备份并恢复为当前配置。返回 (ok, msg)"""
+    """从网盘下载最新一份备份并恢复为当前配置。返回 (ok, msg)"""
     global config_data
-    tmp = ""
     try:
         account = Baidu()
-        remote = _cloud_remote_path()
-        fd, tmp = tempfile.mkstemp(prefix="baidu_config_restore_", suffix=".json")
-        os.close(fd)
-        try:
-            ret = account.run_raw(["download", remote, tmp, "--json"], timeout=180)
-        except Exception as e:
-            return False, f"下载失败：{e}"
-        if not ret.get("_ok"):
-            return False, f"下载失败：{ret.get('_err', '未知错误')}"
-        if ret.get("errno") not in (None, 0):
+        _, remote_dir, _ = _cloud_backup_conf()
+        backs = _cloud_list_backups(account, remote_dir)
+        if not backs:
             return False, "云端还没有备份文件（先点左上角保存，或点备份按钮）"
-        try:
-            with open(tmp, "r", encoding="utf-8") as f:
-                data = json.loads(f.read())
-        except Exception:
-            return False, "云端备份文件损坏（不是有效的 JSON）"
-        if not isinstance(data, dict) or not isinstance(data.get("tasklist"), list):
-            return False, "云端备份文件格式不正确"
+        data, err = _cloud_download_json(account, backs[0]["remote"])
+        if data is None:
+            return False, err
         if os.path.exists(CONFIG_PATH):
             try:
                 shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".bak-" + time.strftime("%Y%m%d%H%M%S"))
@@ -464,41 +492,23 @@ def do_cloud_restore():
             config_data["magic_regex"] = MagicRename().magic_regex
         reload_tasks()
         n = len(data.get("tasklist") or [])
-        logging.info(f">>> 已从云端恢复配置：{n} 个任务")
-        return True, f"已从云端恢复 {n} 个任务，页面即将刷新"
+        logging.info(f">>> 已从云端恢复配置（{backs[0]['name']}）：{n} 个任务")
+        return True, f"已从云端恢复 {n} 个任务（{backs[0]['mtime'] or backs[0]['name']}），页面即将刷新"
     except Exception as e:
         logging.error(traceback.format_exc())
         return False, f"恢复异常：{e}"
-    finally:
-        try:
-            if tmp and os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
 
 
 def cloud_backup_status():
-    """查询云端备份文件是否存在及大小/时间"""
+    """查询云端备份份数及最新一份的信息"""
     try:
         account = Baidu()
         _, remote_dir, _ = _cloud_backup_conf()
-        ret = account.run_raw(["ls", remote_dir, "--json"], timeout=60)
-        items = []
-        if isinstance(ret.get("_list"), list):
-            items = ret["_list"]
-        elif isinstance(ret.get("list"), list):
-            items = ret["list"]
-        elif isinstance(ret.get("data"), list):
-            items = ret["data"]
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            name = it.get("server_filename") or it.get("name") or ""
-            if name == CLOUD_BACKUP_FILE:
-                return {"exists": True, "dir": remote_dir,
-                        "size": it.get("size"),
-                        "mtime": it.get("server_mtime") or it.get("mtime")}
-        return {"exists": False, "dir": remote_dir}
+        backs = _cloud_list_backups(account, remote_dir)
+        if not backs:
+            return {"exists": False, "dir": remote_dir, "count": 0}
+        return {"exists": True, "dir": remote_dir, "count": len(backs),
+                "latest": backs[0]["name"], "mtime": backs[0]["mtime"], "size": backs[0]["size"]}
     except Exception as e:
         return {"exists": False, "error": str(e)[:200]}
 
@@ -515,6 +525,23 @@ def cloud_backup():
         return jsonify({"success": True, "data": cloud_backup_status()})
     ok, msg = do_cloud_backup("manual")
     return jsonify({"success": ok, "message": msg})
+
+
+def _try_cloud_restore_on_init():
+    """启动时本地无配置文件，尝试从云端拉取最新备份。返回 True/False"""
+    try:
+        account = Baidu()
+        backs = _cloud_list_backups(account, CLOUD_BACKUP_DEFAULT_DIR)
+        if not backs:
+            return False
+        data, _ = _cloud_download_json(account, backs[0]["remote"])
+        if data is None:
+            return False
+        Config.write_json(CONFIG_PATH, data)
+        logging.info(">>> 启动时从云端恢复了配置备份")
+        return True
+    except Exception:
+        return False
 
 
 def _share_item_adapter(item, share_dir=""):
