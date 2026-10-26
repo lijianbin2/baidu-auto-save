@@ -397,12 +397,35 @@ class Baidu:
             fsid = str(fsid) if fsid not in (None, "") else ""
         except Exception:
             fsid = ""
+        size = it.get("size", it.get("length", 0))
+        updated_at = it.get("updated_at", it.get("mtime", it.get("server_mtime", it.get("mtimeTs", it.get("time", it.get("modified", it.get("ctime", 0)))))))
+        try:
+            updated_at = int(updated_at)
+        except Exception:
+            updated_at = 0
+        lname = (name or "").lower()
+        if is_dir:
+            obj_category = ""
+        elif lname.endswith((".mp4", ".mkv", ".mov", ".m4v", ".avi", ".mpeg", ".ts", ".rmvb", ".flv", ".wmv")):
+            obj_category = "video"
+        elif lname.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".tiff")):
+            obj_category = "image"
+        elif lname.endswith((".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a")):
+            obj_category = "audio"
+        elif lname.endswith((".pdf", ".doc", ".docx", ".txt", ".md", ".epub", ".ppt", ".pptx", ".xls", ".xlsx")):
+            obj_category = "doc"
+        elif lname.endswith((".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".iso")):
+            obj_category = "archive"
+        else:
+            obj_category = ""
         return {
             "file_name": name,
             "dir": bool(is_dir),
             "fsid": fsid,
-            "size": it.get("size", 0),
+            "size": size,
             "path": it.get("path", ""),
+            "obj_category": obj_category,
+            "updated_at": updated_at,
             "raw": it,
         }
 
@@ -560,6 +583,18 @@ class Baidu:
             return True, ret
         return False, ret
 
+    def delete_paths(self, rel_paths):
+        """删除网盘文件/目录（bdpan rm，目录连带内容）"""
+        paths = [p for p in (rel_paths or []) if p and str(p).strip("/")]
+        if not paths:
+            return {"code": 1, "message": "删除路径为空"}
+        ret = self._run(["rm"] + paths + ["--force", "--json"], timeout=180)
+        if not ret.get("_ok"):
+            return {"code": 1, "message": str(ret.get("_err", "删除调用失败"))[:300]}
+        if ret.get("errno") not in (None, 0):
+            return {"code": 1, "message": json.dumps(ret, ensure_ascii=False)[:300]}
+        return {"code": 0, "message": f"已删除 {len(paths)} 项"}
+
     def _get_file_icon(self, f):
         if f.get("dir"):
             return "📁"
@@ -694,7 +729,7 @@ class Baidu:
                 if share_file["dir"] and not task.get("update_subdir"):
                     pass
                 else:
-                    if share_file.get("fsid") == task.get("startfsid", ""):
+                    if share_file.get("fsid") == task.get("startfid", ""):
                         break
                     continue
             exists = mr.is_exists(share_file["file_name"], dir_filename_list, bool(task.get("ignore_extension")) and not share_file["dir"])
@@ -710,9 +745,18 @@ class Baidu:
             elif share_file["dir"]:
                 # 已存在的目录：删掉重转 or 递归
                 if task.get("update_subdir") and re.search(task.get("update_subdir", ""), share_file["file_name"]):
-                    print(f"🔁 已存在目录需更新：{share_file['file_name']}")
-                    share_file["file_name_re"] = share_file["file_name"]
-                    need_save_list.append(share_file)
+                    if task.get("update_subdir_resave_mode"):
+                        print(f"🗑️ 重存模式：清空后重转 {savepath_rel}/{share_file['file_name']}")
+                        sub_rel = f"{savepath_rel}/{share_file['file_name']}".strip("/")
+                        sub_ls = self.ls_dir(sub_rel)
+                        if sub_ls["ok"] and sub_ls["list"]:
+                            self.delete_paths([f"{sub_rel}/{x['file_name']}" for x in sub_ls["list"]])
+                        share_file["file_name_re"] = share_file["file_name"]
+                        need_save_list.append(share_file)
+                    else:
+                        print(f"🔁 已存在目录需更新：{share_file['file_name']}")
+                        share_file["file_name_re"] = share_file["file_name"]
+                        need_save_list.append(share_file)
                 else:
                     sub_source = (share_file.get("path") or share_file["file_name"]).strip("/")
                     print(f"检查子目录：{savepath_rel}/{share_file['file_name']}")
@@ -727,7 +771,7 @@ class Baidu:
                             tree.merge(f"dir:{sub_source}", sub_tree, deep=False)
                         except Exception:
                             pass
-            if share_file.get("fsid") == task.get("startfsid", ""):
+            if share_file.get("fsid") == task.get("startfid", ""):
                 break
         if re.search(r"\{I+\}", replace or ""):
             try:
@@ -926,6 +970,21 @@ def main():
         CONFIG_DATA = Config.read_json(config_path)
     if tasklist_from_env:
         CONFIG_DATA["tasklist"] = tasklist_from_env
+    if os.environ.get("BAIDU_TEST", "").lower() == "true":
+        if push_cfg := os.environ.get("PUSH_CONFIG"):
+            try:
+                CONFIG_DATA["push_config"] = json.loads(push_cfg)
+            except Exception as e:
+                print(f"推送配置解析失败 {e}")
+        account = Baidu()
+        if not verify_account(account):
+            return
+        for task in (tasklist_from_env or CONFIG_DATA.get("tasklist", [])):
+            print(f"#《{task.get('taskname')}》转存测试")
+            account.do_save_check(task.get("shareurl", ""), task.get("savepath", ""), task.get("pwd", ""))
+        if NOTIFYS:
+            send_ql_notify("【百度自动转存】", "\n\n".join(NOTIFYS))
+        return
     if not CONFIG_DATA.get("tasklist"):
         print("⚠️ 任务列表为空，请先配置 baidu_config.json")
         return

@@ -18,5 +18,11 @@
       "enddate": "2099-01-30",
       "update_subdir": "4k|1080p"
     }
-  ]
+  ],
+  "crontab": "0 8,18,20 * * *",
+  "source": {},
+  "webui": {
+    "username": "admin",
+    "password": "admin123"
+  }
 }

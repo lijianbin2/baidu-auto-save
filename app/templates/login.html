@@ -1,13 +1,85 @@
-<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>登录 - Baidu-Auto-Save</title></head>
-<body style="font-family:sans-serif;max-width:420px;margin:60px auto">
-<h2>🔐 Baidu-Auto-Save 登录</h2>
-<form id="f">账号 <input name="username" value="admin"><br><br>密码 <input name="password" type="password"><br><br><button>登录</button></form>
-<p id="m"></p>
-<script>
-document.getElementById("f").onsubmit = async (e) => {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const r = await fetch("/login", {method: "POST", body: new URLSearchParams(fd)});
-  if (r.ok) location.href = "/"; else document.getElementById("m").textContent = "登录失败";
-};
-</script></body></html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录</title>
+    <link rel="stylesheet" href="./static/css/bootstrap.min.css">
+    <link rel="stylesheet" href="./static/css/bootstrap-icons.min.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #c4d7ff 0%, #7996ff 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+        }
+
+        .login-card {
+            max-width: 400px;
+            width: 100%;
+            margin: 0 auto;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .login-header {
+            background: rgba(255, 255, 255, 0.9);
+            padding: 1rem 2rem;
+            text-align: center;
+        }
+
+        .login-body {
+            background: #fff;
+            padding: 2rem;
+        }
+
+        .btn {
+            border-radius: 20px;
+            padding: 10px 20px;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="login-card">
+            <div class="login-header">
+                <h1 class="mb-3">登录</h1>
+                <p class="text-muted">欢迎回来，请登录您的账户</p>
+            </div>
+            <div class="login-body">
+                {% if message %}
+                <div class="alert alert-danger text-center" role="alert">
+                    [[ message ]]
+                </div>
+                {% endif %}
+                <form action="/login" method="POST">
+                    <div class="form-group mb-3">
+                        <label for="username" class="form-label">用户名</label>
+                        <div class="input-group">
+                            <div class="input-group-prepend">
+                                <span class="input-group-text"><i class="bi bi-person-fill"></i></span>
+                            </div>
+                            <input type="text" class="form-control" id="username" name="username" required>
+                        </div>
+                    </div>
+                    <div class="form-group mb-4">
+                        <label for="password" class="form-label">密码</label>
+                        <div class="input-group">
+                            <div class="input-group-prepend">
+                                <span class="input-group-text"><i class="bi bi-lock-fill"></i></span>
+                            </div>
+                            <input type="password" class="form-control" id="password" name="password" required>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">登录</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
