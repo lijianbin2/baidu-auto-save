@@ -94,6 +94,25 @@ class Config:
 
 
 
+def _conv_share_init(url):
+    """新版 share/init?surl=xxx 链接转旧版 /s/1xxx（bdpan 只认旧版格式）"""
+    try:
+        m = re.search(r"pan\.baidu\.com/share/init\?surl=([A-Za-z0-9_\-]+)", url or "")
+        if not m:
+            return url
+        rest = url or ""
+        pwdm = re.search(r"[?&]pwd=([A-Za-z0-9]{4})", rest)
+        frag = ""
+        if "#" in rest:
+            frag = "#" + rest.split("#", 1)[1]
+        new = "https://pan.baidu.com/s/1" + m.group(1)
+        if pwdm:
+            new += "?pwd=" + pwdm.group(1)
+        return new + frag
+    except Exception:
+        return url
+
+
 class MagicRename:
 
     magic_regex = {
@@ -523,7 +542,7 @@ class Baidu:
     # ---------- 分享 ----------
     @staticmethod
     def extract_share(url, task_pwd=""):
-        url = (url or "").strip()
+        url = _conv_share_init((url or "").strip())
         subdir = ""
         mfrag = re.search(r"#list/path=(.*)$", url)
         if mfrag:

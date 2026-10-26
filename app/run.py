@@ -384,10 +384,29 @@ def _extract_share_title(raw, url, pwd, items):
     return ""
 
 
+def _conv_share_init(url):
+    """新版 share/init?surl=xxx 链接转旧版 /s/1xxx（bdpan 只认旧版格式）"""
+    try:
+        m = re.search(r"pan\.baidu\.com/share/init\?surl=([A-Za-z0-9_\-]+)", url or "")
+        if not m:
+            return url
+        rest = url or ""
+        pwdm = re.search(r"[?&]pwd=([A-Za-z0-9]{4})", rest)
+        frag = ""
+        if "#" in rest:
+            frag = "#" + rest.split("#", 1)[1]
+        new = "https://pan.baidu.com/s/1" + m.group(1)
+        if pwdm:
+            new += "?pwd=" + pwdm.group(1)
+        return new + frag
+    except Exception:
+        return url
+
+
 def _shorturl_title(url):
     """调百度 shorturlinfo 接口拿分享标题（无须登录，最干净）"""
     try:
-        m = re.search(r"/s/([A-Za-z0-9_\-]+)", url or "")
+        m = re.search(r"/s/([A-Za-z0-9_\-]+)", _conv_share_init(url or ""))
         if not m:
             return ""
         api = "https://pan.baidu.com/api/shorturlinfo?shorturl=" + m.group(1) + "&root=1"
