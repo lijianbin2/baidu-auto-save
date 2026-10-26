@@ -641,8 +641,18 @@
         baiduLogout() {
           if (!confirm("确认退出百度网盘登录吗？转存将不可用。")) return;
           axios.post('/bdpan_logout')
-            .then(() => { this.fetchAccountInfo(); })
-            .catch(error => { console.error('Error logout:', error); });
+            .then(response => {
+              if (response.data.success) {
+                this.showToast(response.data.message || "已退出百度网盘", "success");
+              } else {
+                this.showToast("退出失败：" + (response.data.message || "未知错误"), "error");
+              }
+              this.fetchAccountInfo();
+            })
+            .catch(error => {
+              console.error('Error logout:', error);
+              this.showToast("退出请求失败，请检查网络后重试", "error");
+            });
         },
         addTask() {
           newTask = { ...this.newTask }

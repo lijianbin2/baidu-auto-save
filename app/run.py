@@ -266,7 +266,10 @@ def bdpan_logout():
         return jsonify({"success": False, "message": "未登录"})
     account = Baidu()
     account.logout()
-    return jsonify({"success": True, "message": "已退出"})
+    still = account.verify()
+    if still:
+        return jsonify({"success": False, "message": "退出失败，登录态仍在，请重试或在容器内执行 bdpan logout"})
+    return jsonify({"success": True, "message": "已退出百度网盘"})
 
 
 @app.route("/account_info")
@@ -341,7 +344,7 @@ def _extract_share_title(raw, url, pwd, items):
                 t = _pick(data.get(sub))
                 if t:
                     return t
-    t = _fetch_share_page_title(url, pwd)
+    t = _shorturl_title(url)
     if t:
         return t
     if isinstance(items, list) and len(items) == 1 and items[0].get("dir"):
@@ -351,38 +354,23 @@ def _extract_share_title(raw, url, pwd, items):
     return ""
 
 
-def _fetch_share_page_title(url, pwd=""):
-    """抓百度分享页 <title>，如「凡人修仙传_免费高速下载|百度网盘-分享无限制」"""
+def _shorturl_title(url):
+    """调百度 shorturlinfo 接口拿分享标题（无须登录，最干净）"""
     try:
-        m = re.search(r"(https?://pan\.baidu\.com/s/[A-Za-z0-9_\-]+)", url or "")
+        m = re.search(r"/s/([A-Za-z0-9_\-]+)", url or "")
         if not m:
             return ""
-        page = m.group(1)
-        if pwd and "pwd=" not in page:
-            page += ("&" if "?" in page else "?") + "pwd=" + pwd
-        req = urllib.request.Request(page, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            "Accept-Language": "zh-CN,zh;q=0.9",
+        api = "https://pan.baidu.com/api/shorturlinfo?shorturl=" + m.group(1) + "&root=1"
+        req = urllib.request.Request(api, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://pan.baidu.com/",
         })
         with urllib.request.urlopen(req, timeout=8) as r:
-            html = r.read().decode("utf-8", "ignore")
-        mt = re.search(r"<title>(.*?)</title>", html, re.S)
-        if not mt:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+        if not isinstance(d, dict) or d.get("errno") not in (None, 0):
             return ""
-        title = re.sub(r"\s+", " ", mt.group(1)).strip()
-        for sep in ("_免费高速下载", "|百度网盘", "-百度网盘", "百度网盘"):
-            if sep in title:
-                title = title.split(sep)[0].strip()
-        bad_kw = ("提取码", "验证", "verify", "captcha", "404", "错误", "error",
-                  "失效", "取消", "不存在", "已删除", "分享链接", "页面")
-        low = title.lower()
-        if (not title or len(title) < 2
-                or low.endswith((".html", ".htm", ".php", ".aspx", ".jsp"))
-                or any(k in title or k in low for k in bad_kw)
-                or title in ("百度网盘", "百度网盘-分享无限制")):
-            return ""
-        return title
+        t = (d.get("title") or "").strip()
+        return t if len(t) >= 2 else ""
     except Exception:
         return ""
 
@@ -397,16 +385,21 @@ def get_share_detail():
     task = req.get("task") or {}
     magic_regex = req.get("magic_regex", {})
     account = Baidu()
-    url, pwd = Baidu.extract_share(shareurl, task.get("pwd") or req.get("pwd", ""))
+    url, pwd, url_subdir = Baidu.extract_share(shareurl, task.get("pwd") or req.get("pwd", ""))
+    if not source_dir:
+        source_dir = url_subdir
     rs = account.list_share_all(url, pwd, source_dir)
     if not rs.get("ok"):
         raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
+        detail = Baidu.err_text(rs.get("raw"))
         if "13003" in raw or "pwd" in raw.lower():
             err = "该分享需要提取码或提取码错误，请补充提取码后重试"
-        elif "13004" in raw:
-            err = "分享链接已失效、已取消或不存在"
+        elif "13004" in raw or "13000" in raw or "record not found" in raw:
+            err = "分享链接无效、已失效，或提取码错误，请检查链接和提取码"
+        elif detail and detail != rs.get("err", ""):
+            err = detail
         else:
-            err = rs.get("err") or raw[:200]
+            err = rs.get("err") or detail or raw[:200]
         return jsonify({"success": False, "data": {"error": err}})
 
     entries = [_share_item_adapter(x, source_dir) for x in rs.get("list", [])]

@@ -343,20 +343,43 @@ class Baidu:
             return {"_ok": False, "_err": err or f"bdpan 无输出，退出码={p.returncode}", "_code": p.returncode}
         try:
             data = json.loads(out)
+            if not isinstance(data, dict):
+                data = {"_list": data}
             data["_ok"] = True
             data["_code"] = p.returncode
+            if data.get("errno") is None and data.get("code") not in (None, 0):
+                data["errno"] = data.get("code")
             return data
         except Exception:
             return {"_ok": p.returncode == 0, "_raw": out, "_err": err, "_code": p.returncode}
+
+    @staticmethod
+    def err_text(raw, default="操作失败"):
+        if not isinstance(raw, dict):
+            return default
+        for key in ("message", "error", "msg"):
+            v = raw.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()[:300]
+        d = raw.get("data")
+        if isinstance(d, dict):
+            for key in ("message", "error", "msg"):
+                v = d.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()[:300]
+        return default
 
     def verify(self):
         ret = self._run(["whoami", "--json"])
         if not ret.get("_ok"):
             print(f"❌ bdpan whoami 失败：{ret.get('_err')}")
             return None
+        if ret.get("authenticated") is False or ret.get("has_valid_token") is False:
+            print("❌ 百度网盘未登录，请先在 WebUI 点「登录百度网盘」完成授权")
+            return None
         txt = json.dumps(ret, ensure_ascii=False)
         if "未登录" in txt or ret.get("errno") not in (None, 0):
-            print("❌ 百度网盘未登录，请先登录（容器内执行 docker exec -it baidu-auto-save bdpan login）")
+            print("❌ 百度网盘未登录，请先在 WebUI 点「登录百度网盘」完成授权")
             return None
         self.is_active = True
         # whoami --json 含用户名与 vip 字段（不同版本字段名有差异，尽量兼容）
@@ -501,6 +524,18 @@ class Baidu:
     @staticmethod
     def extract_share(url, task_pwd=""):
         url = (url or "").strip()
+        subdir = ""
+        mfrag = re.search(r"#list/path=(.*)$", url)
+        if mfrag:
+            try:
+                import urllib.parse as _up
+                subdir = _up.unquote(mfrag.group(1)).strip().strip("/")
+                if subdir in ("", "/"):
+                    subdir = ""
+            except Exception:
+                subdir = ""
+        # bdpan 解析不了 # 碎片，先去掉
+        url = url.split("#", 1)[0].strip()
         pwd = (task_pwd or "").strip()
         m = re.search(r"[?&]pwd=([A-Za-z0-9]{4})", url)
         if m and not pwd:
@@ -509,7 +544,7 @@ class Baidu:
         m2 = re.search(r"(?:提取码|密码|pwd)[:：\s]*([A-Za-z0-9]{4})", url)
         if m2 and not pwd:
             pwd = m2.group(1)
-        return url, pwd
+        return url, pwd, subdir
 
     def _norm_share_item(self, it):
         n = self._norm_ls_item(it)
@@ -673,7 +708,7 @@ class Baidu:
 
     def do_save_check(self, shareurl, savepath, pwd=""):
         try:
-            url, pp = self.extract_share(shareurl, pwd)
+            url, pp, _sub = self.extract_share(shareurl, pwd)
             r = self.list_share(url, pp, "", 1, 5)
             if not r["ok"]:
                 print(f"❌ 转存测试失败: {r.get('err', r['raw'])}")
@@ -699,18 +734,22 @@ class Baidu:
         if task.get("shareurl_ban"):
             print(f"《{task['taskname']}》：{task['shareurl_ban']}")
             return None
-        url, pwd = self.extract_share(task.get("shareurl", ""), task.get("pwd", ""))
+        url, pwd, url_subdir = self.extract_share(task.get("shareurl", ""), task.get("pwd", ""))
         if not url:
             return None
         probe = self.list_share(url, pwd, "", 1, 5)
         if not probe["ok"]:
             raw = json.dumps(probe.get("raw", {}), ensure_ascii=False)
-            if "13004" in raw or "失效" in raw or "不存在" in raw:
-                msg = "分享链接已失效/不存在"
+            detail = self.err_text(probe.get("raw"))
+            if "13004" in raw or "13000" in raw or "record not found" in raw or "失效" in raw or "不存在" in raw:
+                msg = "分享链接无效、已失效，或提取码错误（请检查链接和提取码）"
             elif "13003" in raw or "提取码" in raw:
                 msg = "需要提取码或提取码错误（请在任务里填 pwd）"
+            elif "网络" in detail or "超时" in detail or "timeout" in detail.lower():
+                print(f"跳过任务：网络异常 {detail}")
+                return None
             else:
-                msg = probe.get("err") or raw[:200]
+                msg = probe.get("err") or detail or raw[:200]
             # 网络类错误不标记 ban，只跳过本次
             if "网络" in msg or "超时" in msg or "timeout" in msg.lower():
                 print(f"跳过任务：网络异常 {msg}")
@@ -718,7 +757,7 @@ class Baidu:
             add_notify(f"❌《{task['taskname']}》：{msg}\n")
             task["shareurl_ban"] = msg
             return None
-        updated_tree = self.dir_check_and_save(task, url, pwd, "", "")
+        updated_tree = self.dir_check_and_save(task, url, pwd, url_subdir, "")
         try:
             size = updated_tree.size(1)
         except Exception:
@@ -739,8 +778,8 @@ class Baidu:
         if not rs["ok"]:
             raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
             if subdir_path == "":
-                if "13004" in raw:
-                    task["shareurl_ban"] = "分享链接已失效/不存在"
+                if "13004" in raw or "13000" in raw or "record not found" in raw:
+                    task["shareurl_ban"] = "分享链接无效、已失效，或提取码错误（请检查链接和提取码）"
                     add_notify(f"❌《{task['taskname']}》：{task['shareurl_ban']}\n")
             return tree
         share_file_list = rs["list"]
