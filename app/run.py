@@ -366,7 +366,7 @@ def _cloud_list_backups(account, remote_dir):
         if not isinstance(it, dict):
             continue
         name = it.get("server_filename") or it.get("name") or ""
-        if name == CLOUD_BACKUP_LEGACY or (name.startswith(CLOUD_BACKUP_PREFIX) and name.endswith(CLOUD_BACKUP_SUFFIX)):
+        if name == CLOUD_BACKUP_LEGACY or (name.startswith("baidu_config") and name.endswith(CLOUD_BACKUP_SUFFIX)):
             out.append({"remote": f"{remote_dir}/{name}", "name": name,
                         "mtime": it.get("server_mtime") or it.get("mtime") or "",
                         "size": it.get("size")})
