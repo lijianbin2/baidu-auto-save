@@ -595,6 +595,50 @@ class Baidu:
             return {"code": 1, "message": json.dumps(ret, ensure_ascii=False)[:300]}
         return {"code": 0, "message": f"已删除 {len(paths)} 项"}
 
+    def get_auth_url(self):
+        """获取百度授权链接（供 WebUI 一键登录）"""
+        ret = self._run(["login", "--get-auth-url", "--accept-disclaimer", "--json"], timeout=60)
+        if not ret.get("_ok"):
+            return {"ok": False, "err": str(ret.get("_err", "获取授权链接失败"))[:200]}
+        url = (ret.get("data") or {}).get("auth_url", "")
+        if not url:
+            return {"ok": False, "err": "未获取到授权链接"}
+        return {"ok": True, "auth_url": url}
+
+    def login_with_code(self, code):
+        """用授权码完成登录（授权码绝不记入日志）"""
+        code = (code or "").strip()
+        if not code:
+            return {"ok": False, "err": "授权码为空"}
+        try:
+            pr = subprocess.run(
+                ["bdpan", "login", "--set-code-stdin", "--accept-disclaimer", "--json"],
+                input=(code + "\n"), capture_output=True, text=True, timeout=120)
+        except FileNotFoundError:
+            return {"ok": False, "err": "未找到 bdpan"}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "err": "登录超时，请重试"}
+        out = (pr.stdout or "").strip()
+        try:
+            data = json.loads(out) if out else {}
+        except Exception:
+            data = {}
+        ok = (pr.returncode == 0 and data.get("code", 0) == 0
+              and data.get("errno", 0) in (None, 0))
+        if ok:
+            self.is_active = False
+            self.nickname = ""
+            self.verify()
+            return {"ok": True, "nickname": self.nickname}
+        msg = data.get("message") or data.get("error") or (pr.stderr or "").strip() or "登录失败"
+        return {"ok": False, "err": str(msg)[:300]}
+
+    def logout(self):
+        self._run(["logout"], timeout=30)
+        self.is_active = False
+        self.nickname = ""
+        return {"ok": True}
+
     def _get_file_icon(self, f):
         if f.get("dir"):
             return "📁"

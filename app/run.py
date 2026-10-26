@@ -236,12 +236,36 @@ def run_script_now():
     )
 
 
-@app.route("/task_suggestions")
-def get_task_suggestions():
+@app.route("/bdpan_auth_url")
+def bdpan_auth_url():
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
-    # 百度版暂无资源搜索源，保持接口兼容
-    return jsonify({"success": True, "data": []})
+    account = Baidu()
+    ret = account.get_auth_url()
+    if not ret.get("ok"):
+        return jsonify({"success": False, "message": ret.get("err", "获取授权链接失败")})
+    return jsonify({"success": True, "auth_url": ret["auth_url"]})
+
+
+@app.route("/bdpan_login", methods=["POST"])
+def bdpan_login():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    code = (request.json or {}).get("code", "")
+    account = Baidu()
+    ret = account.login_with_code(code)
+    if not ret.get("ok"):
+        return jsonify({"success": False, "message": ret.get("err", "登录失败")})
+    return jsonify({"success": True, "message": "登录成功", "nickname": ret.get("nickname", "")})
+
+
+@app.route("/bdpan_logout", methods=["POST"])
+def bdpan_logout():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    account = Baidu()
+    account.logout()
+    return jsonify({"success": True, "message": "已退出"})
 
 
 @app.route("/account_info")
