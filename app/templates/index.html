@@ -815,7 +815,11 @@
               if (action === 'restore' && response.data.success) {
                 setTimeout(() => location.reload(), 1500);
               } else if (response.data.success) {
-                this.fetchData();
+                if (this.configModified) {
+                  this.cloudBackupMsg += '（页面有未保存的修改，已为你保留，点保存后会再次自动备份）';
+                } else {
+                  this.fetchData();
+                }
               }
             })
             .catch(error => {
