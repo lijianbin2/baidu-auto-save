@@ -553,18 +553,21 @@ class Baidu:
 
     def list_share_all(self, share_url, pwd="", source_dir=""):
         all_items = []
+        first_raw = None
         page = 1
         while True:
             r = self.list_share(share_url, pwd, source_dir, page, 100)
             if not r["ok"]:
                 return r
+            if first_raw is None:
+                first_raw = r.get("raw")
             all_items.extend(r["list"])
             if not r["has_more"] or not r["list"]:
                 break
             page += 1
             if page > 50:
                 break
-        return {"ok": True, "list": all_items, "has_more": False}
+        return {"ok": True, "list": all_items, "has_more": False, "raw": first_raw}
 
     def transfer_select(self, share_url, fsids, pwd="", target_dir=""):
         if not fsids:

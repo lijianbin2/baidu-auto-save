@@ -22,6 +22,7 @@ import hashlib
 import logging
 import traceback
 import sys
+import urllib.request
 import os
 import re
 
@@ -319,6 +320,73 @@ def _ancestor_paths(rel):
     return paths
 
 
+def _extract_share_title(raw, url, pwd, items):
+    """尽力推导百度分享标题：bdpan 原始字段 → 分享页 title → 单一顶层目录名"""
+    def _pick(d):
+        if not isinstance(d, dict):
+            return ""
+        for k in ("title", "share_title", "shareTitle", "share_name", "shareName", "name"):
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+    if isinstance(raw, dict):
+        for cand in (raw, raw.get("data")):
+            t = _pick(cand)
+            if t:
+                return t
+        data = raw.get("data")
+        if isinstance(data, dict):
+            for sub in ("share", "info", "link"):
+                t = _pick(data.get(sub))
+                if t:
+                    return t
+    t = _fetch_share_page_title(url, pwd)
+    if t:
+        return t
+    if isinstance(items, list) and len(items) == 1 and items[0].get("dir"):
+        name = (items[0].get("file_name") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def _fetch_share_page_title(url, pwd=""):
+    """抓百度分享页 <title>，如「凡人修仙传_免费高速下载|百度网盘-分享无限制」"""
+    try:
+        m = re.search(r"(https?://pan\.baidu\.com/s/[A-Za-z0-9_\-]+)", url or "")
+        if not m:
+            return ""
+        page = m.group(1)
+        if pwd and "pwd=" not in page:
+            page += ("&" if "?" in page else "?") + "pwd=" + pwd
+        req = urllib.request.Request(page, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        })
+        with urllib.request.urlopen(req, timeout=8) as r:
+            html = r.read().decode("utf-8", "ignore")
+        mt = re.search(r"<title>(.*?)</title>", html, re.S)
+        if not mt:
+            return ""
+        title = re.sub(r"\s+", " ", mt.group(1)).strip()
+        for sep in ("_免费高速下载", "|百度网盘", "-百度网盘", "百度网盘"):
+            if sep in title:
+                title = title.split(sep)[0].strip()
+        bad_kw = ("提取码", "验证", "verify", "captcha", "404", "错误", "error",
+                  "失效", "取消", "不存在", "已删除", "分享链接", "页面")
+        low = title.lower()
+        if (not title or len(title) < 2
+                or low.endswith((".html", ".htm", ".php", ".aspx", ".jsp"))
+                or any(k in title or k in low for k in bad_kw)
+                or title in ("百度网盘", "百度网盘-分享无限制")):
+            return ""
+        return title
+    except Exception:
+        return ""
+
+
 @app.route("/get_share_detail", methods=["POST"])
 def get_share_detail():
     if not is_login():
@@ -346,7 +414,7 @@ def get_share_detail():
         "list": entries,
         "paths": _ancestor_paths(source_dir),
         "has_more": False,
-        "share": {"title": ""},
+        "share": {"title": _extract_share_title(rs.get("raw"), url, pwd, entries)},
     }
 
     if task:

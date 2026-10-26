@@ -445,7 +445,7 @@
           taskname: "",
           shareurl: "",
           pwd: "",
-          savepath: "/",
+          savepath: "/订阅/TASKNAME",
           pattern: "",
           replace: "",
           enddate: "",
@@ -659,6 +659,7 @@
               }
             }
           }
+          newTask.savepath = (newTask.savepath || "").replace(/TASKNAME/g, newTask.taskname || "").replace(/\/{2,}/g, "/");
           this.formData.tasklist.push(newTask);
           // 滚到最下
           setTimeout(() => {
