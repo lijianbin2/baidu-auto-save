@@ -493,6 +493,10 @@ class Baidu:
         ret = self._run(["ls", arg, "--json"])
         if not ret.get("_ok"):
             return {"ok": False, "list": [], "raw": ret}
+        if ret.get("errno") not in (None, 0):
+            # bdpan 出错时也可能吐 JSON（如网络不可达）：errno 非零必须判失败，
+            # 否则会被当成“空目录”，导致已存在文件被重复转存
+            return {"ok": False, "list": [], "raw": ret, "err": Baidu.err_text(ret, "列目录失败")}
         items = []
         if isinstance(ret, list):
             items = ret
