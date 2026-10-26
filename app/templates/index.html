@@ -106,6 +106,29 @@
 
           </div>
 
+            <div class="row title">
+              <div class="col-8">
+                <h2><i class="bi bi-bell"></i> 推送通知 <small class="text-muted" style="font-size:14px">PushPlus</small></h2>
+              </div>
+              <div class="col-4 text-right">
+                <button type="button" class="btn btn-success" @click="testPush()" title="发送测试消息"><i class="bi bi-lightning"></i></button>
+              </div>
+            </div>
+            <div class="form-group row" title="去 pushplus.plus 获取 Token，关注公众号绑定微信后推送到微信">
+              <label class="col-sm-2 col-form-label">Token</label>
+              <div class="col-sm-10">
+                <input type="text" class="form-control" v-model="formData.push_config.PUSH_PLUS_TOKEN" placeholder="必填，pushplus 用户令牌">
+              </div>
+            </div>
+            <div class="form-group row" title="可选：推送到指定群组，不填则只推给自己">
+              <label class="col-sm-2 col-form-label">群组编码</label>
+              <div class="col-sm-10">
+                <input type="text" class="form-control" v-model="formData.push_config.PUSH_PLUS_USER" placeholder="可选，群组 topic 编码">
+              </div>
+            </div>
+            <p class="text-muted small">去 <a href="https://www.pushplus.plus" target="_blank">pushplus.plus</a> 拿 Token → 填好点左上角保存 → 再点 ⚡ 测试，微信会收到一条测试消息。任务有更新/失败都会自动推送。</p>
+
+
           <div>
             <div class="row title">
               <div class="col">
@@ -548,6 +571,7 @@
                   this.taskDirs.push(parentDir);
               });
               this.newTask.addition = config_data.task_plugins_config_default;
+              if (!config_data.push_config) config_data.push_config = {};
               this.formData = config_data;
               setTimeout(() => {
                 this.configModified = false;
@@ -639,6 +663,13 @@
               this.showToast('登录请求失败', 'error');
               this.baiduLogin.loading = false;
             });
+        },
+        testPush() {
+          axios.post('/test_push', { push_config: this.formData.push_config })
+            .then(response => {
+              this.showToast(response.data.message, response.data.success ? 'success' : 'error');
+            })
+            .catch(() => { this.showToast('测试请求失败', 'error'); });
         },
         baiduLogout() {
           if (!confirm("确认退出百度网盘登录吗？转存将不可用。")) return;

@@ -18,6 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import timedelta
 import subprocess
+import requests
 import hashlib
 import logging
 import traceback
@@ -260,6 +261,35 @@ def bdpan_login():
     return jsonify({"success": True, "message": "登录成功", "nickname": ret.get("nickname", "")})
 
 
+@app.route("/test_push", methods=["POST"])
+def test_push():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    cfg = dict(config_data.get("push_config") or {})
+    override = (request.json or {}).get("push_config") or {}
+    cfg.update({k: v for k, v in override.items() if v not in (None, "")})
+    token = (cfg.get("PUSH_PLUS_TOKEN") or "").strip()
+    if not token:
+        return jsonify({"success": False, "message": "请先填写 PushPlus Token"})
+    topic = (cfg.get("PUSH_PLUS_USER") or "").strip()
+    try:
+        r = requests.post(
+            "https://www.pushplus.plus/send",
+            json={
+                "token": token,
+                "title": "【百度自动转存】通知测试",
+                "content": "推送通道正常，之后有转存动态会推送到微信",
+                "topic": topic,
+                "template": "html",
+                "channel": "wechat",
+            },
+            timeout=20,
+        ).json()
+    except Exception as e:
+        return jsonify({"success": False, "message": f"请求失败：{e}"})
+    if r.get("code") == 200:
+        return jsonify({"success": True, "message": "测试消息已发送，请查收微信"})
+    return jsonify({"success": False, "message": f"推送失败：{r.get('msg', r)}"})
 @app.route("/bdpan_logout", methods=["POST"])
 def bdpan_logout():
     if not is_login():
