@@ -501,7 +501,8 @@ class Baidu:
         if isinstance(ret, list):
             items = ret
         else:
-            for k in ("data", "list", "items", "files"):
+            # 注意：bdpan ls 输出裸数组时 _run 会包成 _list 键，必须先认它
+            for k in ("_list", "data", "list", "items", "files"):
                 v = ret.get(k)
                 if isinstance(v, list):
                     items = v
@@ -601,7 +602,7 @@ class Baidu:
         if ret.get("errno") not in (None, 0):
             return {"ok": False, "list": [], "has_more": False, "raw": ret, "err": txt[:300]}
         items = []
-        for k in ("data", "list", "items", "files"):
+        for k in ("_list", "data", "list", "items", "files"):
             v = ret.get(k)
             if isinstance(v, list):
                 items = v
