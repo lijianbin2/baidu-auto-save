@@ -3,3 +3,5 @@ __pycache__/
 config/.bdpan/
 config/baidu_config.json
 .env
+*.bak
+*.bak-*
