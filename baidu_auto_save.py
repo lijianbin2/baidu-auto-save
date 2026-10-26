@@ -372,6 +372,9 @@ class Baidu:
         except Exception:
             return {"_ok": p.returncode == 0, "_raw": out, "_err": err, "_code": p.returncode}
 
+    def run_raw(self, args, timeout=120):
+        return self._run(args, timeout=timeout)
+
     @staticmethod
     def err_text(raw, default="操作失败"):
         if not isinstance(raw, dict):

@@ -127,6 +127,33 @@
             </div>
             <p class="text-muted small">去 <a href="https://www.pushplus.plus" target="_blank">pushplus.plus</a> 拿 Token → 填好点左上角保存 → 再点 ⚡ 测试，微信会收到一条测试消息。任务有更新/失败都会自动推送。</p>
 
+            <div class="row title">
+              <div class="col-8">
+                <h2><i class="bi bi-cloud-arrow-up"></i> 云端备份 <small class="text-muted" style="font-size:14px">百度网盘</small></h2>
+              </div>
+              <div class="col-4 text-right">
+                <button type="button" class="btn btn-success" @click="cloudBackup('now')" title="立即备份当前配置到云端"><i class="bi bi-cloud-upload"></i></button>
+                <button type="button" class="btn btn-warning ml-1" @click="cloudBackup('restore')" title="从云端恢复配置到本地"><i class="bi bi-cloud-download"></i></button>
+              </div>
+            </div>
+            <div class="form-group row" title="开启后：每次保存配置、添加任务、定时转存结束后都会自动备份">
+              <label class="col-sm-2 col-form-label">自动备份</label>
+              <div class="col-sm-10">
+                <div class="form-check" style="padding-top:8px">
+                  <input type="checkbox" class="form-check-input" id="cbEnable" v-model="formData.cloud_backup.enable">
+                  <label class="form-check-label" for="cbEnable">开启（备份到网盘“我的应用数据/bdpan/备份目录”）</label>
+                </div>
+              </div>
+            </div>
+            <div class="form-group row" title="网盘内的备份目录（相对于 我的应用数据/bdpan/）">
+              <label class="col-sm-2 col-form-label">备份目录</label>
+              <div class="col-sm-10">
+                <input type="text" class="form-control" v-model="formData.cloud_backup.dir" placeholder="_backup">
+              </div>
+            </div>
+            <p class="text-muted small">{{ cloudBackupMsg || ('上次备份：' + (formData.cloud_backup.last_backup || '从未备份')) }}。点左上角保存后会自动备份一次；重装/换机后点 <i class="bi bi-cloud-download"></i> 可从云端恢复任务配置。</p>
+
+
 
           <div>
             <div class="row title">
@@ -462,6 +489,7 @@
             }
           },
         },
+        cloudBackupMsg: "",
         toasts: [],
         accountInfo: {},
         baiduLogin: { authUrl: "", code: "", loading: false },
@@ -571,6 +599,9 @@
               });
               this.newTask.addition = config_data.task_plugins_config_default;
               if (!config_data.push_config) config_data.push_config = {};
+              if (!config_data.cloud_backup || typeof config_data.cloud_backup !== 'object') config_data.cloud_backup = {};
+              if (typeof config_data.cloud_backup.enable === 'undefined') config_data.cloud_backup.enable = true;
+              if (!config_data.cloud_backup.dir) config_data.cloud_backup.dir = '_backup';
               this.formData = config_data;
               setTimeout(() => {
                 this.configModified = false;
@@ -773,6 +804,25 @@
           }).catch(error => {
             console.error('Error get_share_detail:', error);
           });
+        },
+        cloudBackup(action) {
+          if (action === 'restore' && !confirm('确定从云端备份恢复配置吗？当前本地配置会被覆盖（会自动保留一份 .bak 备份）。')) return;
+          this.cloudBackupMsg = action === 'restore' ? '正在从云端恢复…' : '正在备份到云端…';
+          axios.post('/cloud_backup', { action })
+            .then(response => {
+              this.showToast(response.data.message, response.data.success ? 'success' : 'error');
+              this.cloudBackupMsg = response.data.message;
+              if (action === 'restore' && response.data.success) {
+                setTimeout(() => location.reload(), 1500);
+              } else if (response.data.success) {
+                this.fetchData();
+              }
+            })
+            .catch(error => {
+              console.error('Error cloud backup:', error);
+              this.showToast('请求失败', 'error');
+              this.cloudBackupMsg = '请求失败';
+            });
         },
         clearData(target) {
           this[target] = "";
