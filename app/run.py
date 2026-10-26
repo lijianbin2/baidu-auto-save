@@ -182,10 +182,16 @@ def update():
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
     allowed_keys = ["crontab", "push_config", "tasklist",
-                    "magic_regex", "plugins", "source", "cloud_backup"]
+                    "magic_regex", "plugins", "source", "cloud_backup", "schedule"]
     for key, value in request.json.items():
         if key in allowed_keys:
             config_data.update({key: value})
+    if isinstance(request.json.get("schedule"), dict):
+        cron, err = build_crontab(request.json["schedule"])
+        if err:
+            return jsonify({"success": False, "message": err})
+        config_data["schedule"] = request.json["schedule"]
+        config_data["crontab"] = cron
     Config.write_json(CONFIG_PATH, config_data)
     if reload_tasks():
         logging.info(">>> 配置更新成功")
@@ -326,6 +332,49 @@ def account_info():
 
 
 # ---------------- 云端备份：设置自动备份到百度网盘（保留最近 N 份） ----------------
+def build_crontab(schedule):
+    """把 {mode: hours|days, every: N, at: HH:MM} 换算成 cron。返回 (cron, err)"""
+    try:
+        mode = (schedule.get("mode") or "hours").strip()
+        every = int(schedule.get("every") or 0)
+        at = (schedule.get("at") or "08:00").strip()
+        if mode == "days":
+            if every < 1 or every > 30:
+                return "", "每N天：天数填 1-30"
+            m = re.match(r"^(\d{1,2}):(\d{1,2})$", at)
+            if not m:
+                return "", "时间格式应为 HH:MM"
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+                return "", "时间超出范围"
+            return f"{mm} {hh} */{every} * *", ""
+        else:
+            if every < 1 or every > 24:
+                return "", "每N小时：小时数填 1-24"
+            return (f"0 */{every} * * *" if every > 1 else "0 * * * *"), ""
+    except Exception as e:
+        return "", f"定时设置无效：{e}"
+
+
+def parse_crontab(cron):
+    """把常见 cron 反推回界面值，推不出就默认每小时"""
+    try:
+        parts = (cron or "").strip().split()
+        if len(parts) == 5:
+            mm, hh, dom, _, _ = parts
+            m = re.match(r"^\*/(\d+)$", dom)
+            if m and 1 <= int(m.group(1)) <= 30 and mm.isdigit() and hh.isdigit():
+                return {"mode": "days", "every": int(m.group(1)), "at": f"{int(hh):02d}:{int(mm):02d}"}
+            m = re.match(r"^\*/(\d+)$", hh)
+            if m and 1 <= int(m.group(1)) <= 24 and mm == "0":
+                return {"mode": "hours", "every": int(m.group(1)), "at": "08:00"}
+            if hh == "*" and mm == "0":
+                return {"mode": "hours", "every": 1, "at": "08:00"}
+    except Exception:
+        pass
+    return {"mode": "hours", "every": 1, "at": "08:00"}
+
+
 CLOUD_BACKUP_PREFIX = "baidu_config_"
 CLOUD_BACKUP_SUFFIX = ".json"
 CLOUD_BACKUP_LEGACY = "baidu_config.json"
@@ -938,6 +987,11 @@ def init():
 
     if not config_data.get("crontab"):
         config_data["crontab"] = os.environ.get("CRON", "0 8,18,20 * * *")
+    if not isinstance(config_data.get("schedule"), dict):
+        try:
+            config_data["schedule"] = parse_crontab(config_data.get("crontab", ""))
+        except Exception:
+            config_data["schedule"] = {"mode": "hours", "every": 1, "at": "08:00"}
 
     _, plugins_config_default, task_plugins_config_default = Config.load_plugins()
     for name, config in plugins_config_default.items():

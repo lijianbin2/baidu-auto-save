@@ -91,17 +91,26 @@
             <div class="row title">
               <div class="col">
                 <h2 style="display: inline-block;"><i class="bi bi-clock"></i> 定时规则</h2>
-                <span class="badge badge-pill badge-light">
-                  <a target="_blank" href="https://tool.lu/crontab/" title="CRON时间计算器">?</a>
-                </span>
               </div>
             </div>
-            <div class="input-group mb-2">
-              <div class="input-group-prepend">
-                <span class="input-group-text">Crontab</span>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">执行频率</label>
+              <div class="col-sm-10">
+                <div class="form-check" style="padding-top:8px">
+                  <input type="radio" id="schedH" value="hours" v-model="formData.schedule.mode" class="form-check-input" @change="fixScheduleRange">
+                  <label class="form-check-label mr-2" for="schedH">每</label>
+                  <input type="number" min="1" max="24" v-model.number="formData.schedule.every" class="form-control d-inline-block" style="width:90px" :disabled="formData.schedule.mode!=='hours'">
+                  <span class="mr-3">小时执行一次</span>
+                  <input type="radio" id="schedD" value="days" v-model="formData.schedule.mode" class="form-check-input ml-2" @change="fixScheduleRange">
+                  <label class="form-check-label mr-2" for="schedD">每</label>
+                  <input type="number" min="1" max="30" v-model.number="formData.schedule.every" class="form-control d-inline-block" style="width:90px" :disabled="formData.schedule.mode!=='days'">
+                  <span class="mr-2">天</span>
+                  <input type="time" v-model="formData.schedule.at" class="form-control d-inline-block" style="width:130px" :disabled="formData.schedule.mode!=='days'">
+                  <span>执行</span>
+                </div>
               </div>
-              <input type="text" v-model="formData.crontab" class="form-control" placeholder="必填">
             </div>
+            <p class="text-muted small">实际规则：<code>{{ cronPreview() }}</code>，保存后生效</p>
 
           </div>
 
@@ -599,6 +608,13 @@
               });
               this.newTask.addition = config_data.task_plugins_config_default;
               if (!config_data.push_config) config_data.push_config = {};
+              if (!config_data.schedule || typeof config_data.schedule !== 'object') {
+                config_data.schedule = {mode:'hours', every:1, at:'08:00'};
+                var cm;
+                if (config_data.crontab && (cm = config_data.crontab.match(/^0 \*\/(\d+) \* \* \*$/))) {
+                  var cn = parseInt(cm[1]); if (cn >= 1 && cn <= 24) config_data.schedule.every = cn;
+                }
+              }
               if (!config_data.cloud_backup || typeof config_data.cloud_backup !== 'object') config_data.cloud_backup = {};
               if (typeof config_data.cloud_backup.enable === 'undefined') config_data.cloud_backup.enable = true;
               if (!config_data.cloud_backup.dir) config_data.cloud_backup.dir = '_backup';
@@ -827,6 +843,31 @@
               this.showToast('请求失败', 'error');
               this.cloudBackupMsg = '请求失败';
             });
+        },
+        fixScheduleRange() {
+          if (!this.formData.schedule) this.formData.schedule = {mode:'hours', every:1, at:'08:00'};
+          var s = this.formData.schedule;
+          s.every = parseInt(s.every) || 1;
+          if (s.mode === 'days') {
+            if (s.every < 1) s.every = 1;
+            if (s.every > 30) s.every = 30;
+            if (!/^(\d{1,2}):(\d{1,2})$/.test(s.at || '')) s.at = '08:00';
+          } else {
+            if (s.every < 1) s.every = 1;
+            if (s.every > 24) s.every = 24;
+          }
+        },
+        cronPreview() {
+          try {
+            var s = this.formData.schedule || {};
+            var every = parseInt(s.every) || 0;
+            if (s.mode === 'days') {
+              if (every < 1 || every > 30) return '（天数填 1-30）';
+              return '每天 ' + (s.at || '08:00') + '，每 ' + every + ' 天一次';
+            }
+            if (every < 1 || every > 24) return '（小时数填 1-24）';
+            return every === 1 ? '每小时整点一次' : '每 ' + every + ' 小时一次';
+          } catch (e) { return ''; }
         },
         clearData(target) {
           this[target] = "";

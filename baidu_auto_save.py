@@ -832,7 +832,11 @@ class Baidu:
             print(f"❌ 目录 {self.show_path(savepath_rel)} 创建/检查失败，跳过")
             return tree
         rd = self.ls_dir(savepath_rel)
-        dir_file_list = rd["list"] if rd["ok"] else []
+        if not rd["ok"]:
+            # 目标目录列不出来时不能当成空目录，否则已存在的文件会被重复转存；跳过等下次
+            print(f"⚠️ 目标目录 {self.show_path(savepath_rel)} 列表失败，本次跳过，下次重试")
+            return tree
+        dir_file_list = rd["list"]
         dir_filename_list = [d["file_name"] for d in dir_file_list]
         root_id = f"root:{savepath_rel}"
         tree.create_node(self.show_path(savepath_rel), root_id, data={"is_dir": True})
