@@ -1128,7 +1128,20 @@ def main():
     if not verify_account(account):
         return
     do_save(account, CONFIG_DATA.get("tasklist", []))
-    # 回写 ban 标记等
+    # 回写 ban 标记等；单任务手动运行时任务列表来自环境变量，只含子集，
+    # 此时只把 ban 标记合并回磁盘完整列表，绝不能整体覆盖
+    if tasklist_from_env:
+        try:
+            disk = Config.read_json(config_path)
+            by_url = {x.get("shareurl"): x for x in disk.get("tasklist", []) if isinstance(x, dict)}
+            for x in CONFIG_DATA.get("tasklist", []):
+                o = by_url.get(x.get("shareurl"))
+                if o is not None and "shareurl_ban" in x:
+                    o["shareurl_ban"] = x["shareurl_ban"]
+            if isinstance(disk.get("tasklist"), list):
+                CONFIG_DATA["tasklist"] = disk["tasklist"]
+        except Exception as e:
+            print(f"合并回写配置失败: {e}")
     try:
         Config.write_json(config_path, CONFIG_DATA)
     except Exception as e:
