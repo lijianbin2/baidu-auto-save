@@ -349,6 +349,7 @@ class Baidu:
         self.nickname = ""
         self.vip_type = None
         self.savepath_cache = {}
+        self._ls_cache = {}
 
     # ---------- 底层 ----------
     @staticmethod
@@ -552,7 +553,8 @@ class Baidu:
         for part in parts:
             cur = f"{cur}/{part}".strip("/")
             r = self.ls_dir(cur)
-            if r["ok"] and (r["list"] or True):
+            if r["ok"]:
+                self._ls_cache[cur] = r["list"]
                 # ls 成功即认为存在（空目录也返回 ok 但 list 为空，需再判断是否是“目录不存在”错误）
                 # bdpan 对不存在目录返回 errno 非零或 _ok False，这里 ok=True 说明存在
                 self.savepath_cache[cur] = True
@@ -852,7 +854,10 @@ class Baidu:
         if not self.ensure_dir(savepath_rel):
             print(f"❌ 目录 {self.show_path(savepath_rel)} 创建/检查失败，跳过")
             return tree
-        rd = self.ls_dir(savepath_rel)
+        if savepath_rel in self._ls_cache:
+            rd = {"ok": True, "list": self._ls_cache[savepath_rel]}
+        else:
+            rd = self.ls_dir(savepath_rel)
         if not rd["ok"]:
             # 目标目录列不出来时不能当成空目录，否则已存在的文件会被重复转存；跳过等下次
             print(f"⚠️ 目标目录 {self.show_path(savepath_rel)} 列表失败，本次跳过，下次重试")
