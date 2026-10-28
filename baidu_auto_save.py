@@ -17,6 +17,10 @@ import subprocess
 import traceback
 import shutil
 import urllib.parse
+import tempfile
+import threading
+
+_WRITE_LOCK = threading.Lock()
 from datetime import datetime
 from natsort import natsorted
 
@@ -58,8 +62,20 @@ class Config:
 
     @staticmethod
     def write_json(config_path, data):
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, sort_keys=False, indent=2)
+        # 原子写入：先写临时文件再 rename，避免并发写入导致配置文件损坏
+        d = os.path.dirname(os.path.abspath(config_path)) or "."
+        with _WRITE_LOCK:
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, sort_keys=False, indent=2)
+                os.replace(tmp, config_path)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                raise
 
     @staticmethod
     def load_plugins(plugins_config=None, plugins_dir="plugins"):
