@@ -748,7 +748,13 @@
               }
             }
           }
-          newTask.savepath = (newTask.savepath || "").replace(/TASKNAME/g, newTask.taskname || "").replace(/\/{2,}/g, "/");
+          newTask.savepath = this.fillTaskname(newTask.savepath, newTask.taskname).replace(/\/{2,}/g, "/");
+          if (newTask.taskname) {
+            var wantEnd = '/' + newTask.taskname;
+            if (newTask.savepath !== wantEnd && newTask.savepath.slice(-wantEnd.length) !== wantEnd) {
+              newTask.savepath = (newTask.savepath.replace(/\/+$/, '') || '') + wantEnd;
+            }
+          }
           this.formData.tasklist.push(newTask);
           // 滚到最下
           setTimeout(() => {
@@ -757,21 +763,30 @@
             });
           }, 1);
         },
+        fillTaskname(path, name) {
+          return (path || '').split('TASKNAME').join(name || '');
+        },
         focusTaskname(index, task) {
           this.smart_param.index = index
           this.smart_param.origin_savepath = task.savepath
-          regex = new RegExp(`/${task.taskname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/|$)`)
-          if (task.savepath.includes('TASKNAME')) {
+          var m = (task.savepath || '').match(new RegExp(`/${(task.taskname || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/|$)`))
+          if ((task.savepath || '').includes('TASKNAME')) {
             this.smart_param.savepath = task.savepath;
-          } else if (task.savepath.match(regex)) {
-            this.smart_param.savepath = task.savepath.replace(task.taskname, 'TASKNAME');
+          } else if (m) {
+            this.smart_param.savepath = task.savepath.slice(0, m.index) + '/TASKNAME' + (m[1] || '');
           } else {
             this.smart_param.savepath = undefined;
           }
         },
         changeTaskname(index, task) {
-          if (this.smart_param.savepath)
-            task.savepath = this.smart_param.savepath.replace('TASKNAME', task.taskname);
+          if (!this.smart_param.savepath || !task.taskname) return;
+          var next = this.fillTaskname(this.smart_param.savepath, task.taskname);
+          var origin = this.smart_param.origin_savepath || '';
+          var parent = origin.slice(0, Math.max(0, origin.lastIndexOf('/')));
+          if (parent && next !== parent + '/' + task.taskname && next.indexOf(parent + '/') !== 0) {
+            next = parent + '/' + task.taskname;
+          }
+          task.savepath = next;
         },
         removeTask(index) {
           if (confirm("确认删除任务 [#" + (index + 1) + ": " + this.formData.tasklist[index].taskname + "] 吗？"))
@@ -786,7 +801,7 @@
             const matches = decodeURIComponent(task.shareurl).match(/\/(\w{32})-([^\/]+)$/);
             if (matches) {
               task.taskname = task.taskname == "" ? matches[2] : task.taskname;
-              task.savepath = task.savepath.replace(/TASKNAME/g, matches[2]);
+              task.savepath = this.fillTaskname(task.savepath, matches[2]);
             }
           } catch (e) {
             console.error("Error decodeURIComponent:", e);
@@ -812,7 +827,7 @@
               this.$set(task, "shareurl_ban", share_detail.error);
             } else if (share_detail.share && share_detail.share.title) {
               task.taskname = task.taskname == "" ? share_detail.share.title : task.taskname;
-              task.savepath = task.savepath.replace(/TASKNAME/g, share_detail.share.title);
+              task.savepath = this.fillTaskname(task.savepath, share_detail.share.title);
               this.$set(task, "shareurl_ban", undefined);
             } else {
               this.$set(task, "shareurl_ban", undefined);
