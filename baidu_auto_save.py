@@ -784,26 +784,6 @@ class Baidu:
         url, pwd, url_subdir = self.extract_share(task.get("shareurl", ""), task.get("pwd", ""))
         if not url:
             return None
-        probe = self.list_share(url, pwd, "", 1, 5)
-        if not probe["ok"]:
-            raw = json.dumps(probe.get("raw", {}), ensure_ascii=False)
-            detail = self.err_text(probe.get("raw"))
-            if "13004" in raw or "13000" in raw or "record not found" in raw or "失效" in raw or "不存在" in raw:
-                msg = "分享链接无效、已失效，或提取码错误（请检查链接和提取码）"
-            elif "13003" in raw or "提取码" in raw:
-                msg = "需要提取码或提取码错误（请在任务里填 pwd）"
-            elif "网络" in detail or "超时" in detail or "timeout" in detail.lower():
-                print(f"跳过任务：网络异常 {detail}")
-                return None
-            else:
-                msg = probe.get("err") or detail or raw[:200]
-            # 网络类错误不标记 ban，只跳过本次
-            if "网络" in msg or "超时" in msg or "timeout" in msg.lower():
-                print(f"跳过任务：网络异常 {msg}")
-                return None
-            add_notify(f"❌《{task['taskname']}》：{msg}\n")
-            task["shareurl_ban"] = msg
-            return None
         updated_tree = self.dir_check_and_save(task, url, pwd, url_subdir, "")
         try:
             size = updated_tree.size(1)
@@ -824,10 +804,22 @@ class Baidu:
         rs = self.list_share_all(share_url, pwd, source_dir)
         if not rs["ok"]:
             raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
+            detail = self.err_text(rs.get("raw"))
             if subdir_path == "":
-                if "13004" in raw or "13000" in raw or "record not found" in raw:
-                    task["shareurl_ban"] = "分享链接无效、已失效，或提取码错误（请检查链接和提取码）"
-                    add_notify(f"❌《{task['taskname']}》：{task['shareurl_ban']}\n")
+                if "13004" in raw or "13000" in raw or "record not found" in raw or "失效" in raw or "不存在" in raw:
+                    msg = "分享链接无效、已失效，或提取码错误（请检查链接和提取码）"
+                elif "13003" in raw or "提取码" in raw:
+                    msg = "需要提取码或提取码错误（请在任务里填 pwd）"
+                elif "网络" in detail or "超时" in detail or "timeout" in detail.lower():
+                    print(f"跳过任务：网络异常 {detail}")
+                    return tree
+                else:
+                    msg = rs.get("err") or detail or raw[:200]
+                if "网络" in msg or "超时" in msg or "timeout" in msg.lower():
+                    print(f"跳过任务：网络异常 {msg}")
+                    return tree
+                task["shareurl_ban"] = msg
+                add_notify(f"❌《{task['taskname']}》：{msg}\n")
             return tree
         share_file_list = rs["list"]
         if not share_file_list:
