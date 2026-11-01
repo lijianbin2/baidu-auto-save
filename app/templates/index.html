@@ -219,7 +219,7 @@
                     <label class="col-sm-2 col-form-label">任务名称</label>
                     <div class="col-sm-10">
                       <div class="input-group">
-                        <input type="text" name="taskname[]" class="form-control" v-model="task.taskname" placeholder="必填" @focus="focusTaskname(index, task)" @input="changeTaskname(index, task)">
+                        <input type="text" name="taskname[]" class="form-control" v-model="task.taskname" placeholder="必填" @focus="focusTaskname(index, task)" @input="changeTaskname(index, task, $event)">
                         
                         <div class="input-group-append" title="深度搜索">
                           
@@ -778,13 +778,14 @@
             this.smart_param.savepath = undefined;
           }
         },
-        changeTaskname(index, task) {
-          if (!this.smart_param.savepath || !task.taskname) return;
-          var next = this.fillTaskname(this.smart_param.savepath, task.taskname);
+        changeTaskname(index, task, e) {
+          var name = (e && e.target) ? e.target.value : task.taskname;
+          if (!this.smart_param.savepath || !name) return;
+          var next = this.fillTaskname(this.smart_param.savepath, name);
           var origin = this.smart_param.origin_savepath || '';
           var parent = origin.slice(0, Math.max(0, origin.lastIndexOf('/')));
-          if (parent && next !== parent + '/' + task.taskname && next.indexOf(parent + '/') !== 0) {
-            next = parent + '/' + task.taskname;
+          if (parent && next !== parent + '/' + name && next.indexOf(parent + '/') !== 0) {
+            next = parent + '/' + name;
           }
           task.savepath = next;
         },
