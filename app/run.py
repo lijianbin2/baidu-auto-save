@@ -79,6 +79,18 @@ config_data = {}
 task_plugins_config_default = {}
 
 app = Flask(__name__)
+
+
+@app.after_request
+def _no_store_html(resp):
+    try:
+        if (resp.content_type or "").startswith("text/html"):
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+    except Exception:
+        pass
+    return resp
+
 app.config["APP_VERSION"] = get_app_ver()
 app.secret_key = "baidu-auto-save-secret-key"
 app.config["SESSION_COOKIE_NAME"] = "BAIDU_AUTO_SAVE_SESSION"
