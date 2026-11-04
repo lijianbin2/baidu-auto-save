@@ -343,6 +343,9 @@ class MagicRename:
 class Baidu:
     """百度网盘驱动：全部走 bdpan CLI（--json），无需自备 AppKey。"""
 
+    # 链接失效后，隔多久自动再检查一次（期间页面显示黄色感叹号提醒）
+    SHARE_BAN_RETRY_SECONDS = 12 * 3600
+
     def __init__(self, index=0):
         self.index = index + 1
         self.is_active = False
@@ -406,6 +409,59 @@ class Baidu:
                 v = d.get(key)
                 if isinstance(v, str) and v.strip():
                     return v.strip()[:300]
+        return default
+
+    # 分享类错误码 → 面向用户的提示（WebUI 上的黄色感叹号就显示这句话）
+    _SHARE_ERR_HINTS = {
+        "13001": "分享链接已失效（分享者已取消分享，或链接被删除）",
+        "13003": "需要提取码或提取码错误（请在任务里填写提取码）",
+        "13004": "分享链接不存在或已被删除",
+        "13005": "分享链接已过期",
+        "13008": "分享链接访问受限，暂时无法转存",
+        "13015": "分享文件已被删除",
+        "13016": "分享文件违规，已被屏蔽",
+        "13017": "分享链接已失效",
+        "13018": "分享链接已失效",
+        "-9": "分享链接已失效",
+    }
+
+    @staticmethod
+    def _looks_like_network_error(txt):
+        if not txt:
+            return False
+        s = str(txt).lower()
+        return any(
+            k in s
+            for k in ("网络", "超时", "timeout", "timed out", "connection", "econn", "socket")
+        )
+
+    @staticmethod
+    def share_err_hint(raw, detail="", default="分享链接无效或已失效"):
+        """把百度接口的错误码翻译成一句用户能看懂的话（用于失效提醒）"""
+        try:
+            txt = json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw)
+        except Exception:
+            txt = str(raw)
+        low = txt.lower()
+        if "13003" in txt or "提取码" in txt or "passcode" in low:
+            return Baidu._SHARE_ERR_HINTS["13003"]
+        for code, hint in Baidu._SHARE_ERR_HINTS.items():
+            if re.search(rf"errno[\s\"':=]*{re.escape(code)}(?!\d)", txt):
+                return hint
+        for phrase, code in (
+            ("share link status is abnormal", "13001"),
+            ("share link has been cancelled", "13001"),
+            ("share link is expired", "13005"),
+            ("share link not exist", "13004"),
+            ("share file has been deleted", "13015"),
+            ("record not found", "13004"),
+            ("失效", "13001"),
+            ("不存在", "13004"),
+        ):
+            if phrase in low:
+                return Baidu._SHARE_ERR_HINTS[code]
+        if detail and len(detail) <= 120 and not detail.strip().startswith("{"):
+            return detail
         return default
 
     def verify(self):
@@ -778,9 +834,23 @@ class Baidu:
             return False
 
     def do_save_task(self, task):
-        if task.get("shareurl_ban"):
-            print(f"《{task['taskname']}》：{task['shareurl_ban']}")
-            return None
+        ban = task.get("shareurl_ban")
+        if ban:
+            # 失效提醒不是永久拉黑：超过重试间隔后自动再检查一次，
+            # 链接恢复可用时标记会被清掉，页面上的黄色感叹号也随之消失
+            try:
+                banned_at = float(task.get("shareurl_ban_at") or 0)
+            except Exception:
+                banned_at = 0
+            if banned_at and (time.time() - banned_at) < self.SHARE_BAN_RETRY_SECONDS:
+                print(f"《{task['taskname']}》：{ban}")
+                return None
+            print(
+                f"《{task['taskname']}》：{ban}"
+                f"（已超过 {self.SHARE_BAN_RETRY_SECONDS // 3600} 小时，重新检查一次）"
+            )
+            task.pop("shareurl_ban", None)
+            task.pop("shareurl_ban_at", None)
         url, pwd, url_subdir = self.extract_share(task.get("shareurl", ""), task.get("pwd", ""))
         if not url:
             return None
@@ -806,25 +876,25 @@ class Baidu:
             raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
             detail = self.err_text(rs.get("raw"))
             if subdir_path == "":
-                if "13004" in raw or "13000" in raw or "record not found" in raw or "失效" in raw or "不存在" in raw:
-                    msg = "分享链接无效、已失效，或提取码错误（请检查链接和提取码）"
-                elif "13003" in raw or "提取码" in raw:
-                    msg = "需要提取码或提取码错误（请在任务里填 pwd）"
-                elif "网络" in detail or "超时" in detail or "timeout" in detail.lower():
-                    print(f"跳过任务：网络异常 {detail}")
+                # 网络抖动不算失效：不写失效标记，下次再试
+                if self._looks_like_network_error(detail) or self._looks_like_network_error(raw):
+                    print(f"跳过任务：网络异常 {detail or raw[:200]}")
                     return tree
-                else:
-                    msg = rs.get("err") or detail or raw[:200]
-                if "网络" in msg or "超时" in msg or "timeout" in msg.lower():
-                    print(f"跳过任务：网络异常 {msg}")
-                    return tree
+                msg = self.share_err_hint(rs.get("raw"), detail)
+                print(f"❌《{task['taskname']}》分享检查失败：{detail or raw[:300]}")
                 task["shareurl_ban"] = msg
+                task["shareurl_ban_at"] = time.time()
                 add_notify(f"❌《{task['taskname']}》：{msg}\n")
             return tree
+        # 链接又能正常读取了：清掉旧的失效提醒
+        if subdir_path == "":
+            task.pop("shareurl_ban", None)
+            task.pop("shareurl_ban_at", None)
         share_file_list = rs["list"]
         if not share_file_list:
             if subdir_path == "":
                 task["shareurl_ban"] = "分享为空，文件已被分享者删除"
+                task["shareurl_ban_at"] = time.time()
                 add_notify(f"❌《{task['taskname']}》：{task['shareurl_ban']}\n")
             return tree
         if len(share_file_list) == 1 and share_file_list[0]["dir"] and subdir_path == "" and not source_dir:
@@ -1149,8 +1219,16 @@ def main():
             by_url = {x.get("shareurl"): x for x in disk.get("tasklist", []) if isinstance(x, dict)}
             for x in CONFIG_DATA.get("tasklist", []):
                 o = by_url.get(x.get("shareurl"))
-                if o is not None and "shareurl_ban" in x:
+                if o is None:
+                    continue
+                # 失效标记双向同步：这次跑出来失效就写回，这次能正常读取就清掉
+                if x.get("shareurl_ban"):
                     o["shareurl_ban"] = x["shareurl_ban"]
+                    if x.get("shareurl_ban_at") is not None:
+                        o["shareurl_ban_at"] = x["shareurl_ban_at"]
+                else:
+                    o.pop("shareurl_ban", None)
+                    o.pop("shareurl_ban_at", None)
             if isinstance(disk.get("tasklist"), list):
                 CONFIG_DATA["tasklist"] = disk["tasklist"]
         except Exception as e:

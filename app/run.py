@@ -78,6 +78,62 @@ TASK_TIMEOUT = int(os.environ.get("TASK_TIMEOUT", 1800))
 config_data = {}
 task_plugins_config_default = {}
 
+
+def _read_disk_config():
+    """读取磁盘上的最新配置。
+
+    转存任务跑在独立子进程里，会把 shareurl_ban（链接失效提醒）等运行状态
+    直接写回配置文件；Web 进程内存里的副本可能是几小时前的，写盘前必须重新读。
+    """
+    try:
+        if os.path.exists(CONFIG_PATH):
+            data = Config.read_json(CONFIG_PATH)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logging.error(f">>> 读取配置文件失败：{e}")
+    return None
+
+
+def _fresh_config_base():
+    """以磁盘最新配置为底，同时保证 webui 凭据存在（登录态依赖它）"""
+    base = _read_disk_config()
+    if not isinstance(base, dict):
+        return config_data
+    old = config_data.get("webui") or {}
+    webui = base.get("webui")
+    if not isinstance(webui, dict) or not webui.get("username"):
+        if isinstance(old, dict) and old.get("username"):
+            base["webui"] = old
+    return base
+
+
+def _merge_task_ban_flags(tasks, disk_tasks):
+    """保存配置时，把子进程写回磁盘的「链接失效」标记合并进来。
+
+    页面可能是在任务运行之前打开的，提交的任务列表里没有 shareurl_ban；
+    直接覆盖会让刚检测到的失效提醒丢失，页面上的黄色感叹号就不显示了。
+    只在分享链接没变、且提交内容里没有该标记时才补，用户改了链接就让标记自然清掉。
+    """
+    if not isinstance(tasks, list) or not isinstance(disk_tasks, list):
+        return 0
+    bans = {}
+    for t in disk_tasks:
+        if isinstance(t, dict) and t.get("shareurl_ban"):
+            bans[t.get("shareurl")] = t
+    merged = 0
+    for t in tasks:
+        if not isinstance(t, dict) or t.get("shareurl_ban"):
+            continue
+        old = bans.get(t.get("shareurl"))
+        if old is None:
+            continue
+        t["shareurl_ban"] = old["shareurl_ban"]
+        if old.get("shareurl_ban_at") is not None:
+            t["shareurl_ban_at"] = old["shareurl_ban_at"]
+        merged += 1
+    return merged
+
 app = Flask(__name__)
 
 
@@ -193,16 +249,22 @@ def update():
     global config_data
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
+    payload = request.json or {}
+    # 先同步磁盘上的最新配置（后台转存子进程会写回 shareurl_ban 等运行状态），
+    # 再叠加用户这次的修改，避免用旧的内存副本把刚检测到的失效提醒抹掉
+    config_data = _fresh_config_base()
+    if isinstance(payload.get("tasklist"), list):
+        _merge_task_ban_flags(payload["tasklist"], config_data.get("tasklist"))
     allowed_keys = ["crontab", "push_config", "tasklist",
                     "magic_regex", "plugins", "source", "cloud_backup", "schedule"]
-    for key, value in request.json.items():
+    for key, value in payload.items():
         if key in allowed_keys:
             config_data.update({key: value})
-    if isinstance(request.json.get("schedule"), dict):
-        cron, err = build_crontab(request.json["schedule"])
+    if isinstance(payload.get("schedule"), dict):
+        cron, err = build_crontab(payload["schedule"])
         if err:
             return jsonify({"success": False, "message": err})
-        config_data["schedule"] = request.json["schedule"]
+        config_data["schedule"] = payload["schedule"]
         config_data["crontab"] = cron
     Config.write_json(CONFIG_PATH, config_data)
     if reload_tasks():
@@ -509,7 +571,17 @@ def do_cloud_backup(reason=""):
             cb["last_backup"] = disp_ts
             cb["last_result"] = "ok"
             try:
-                Config.write_json(CONFIG_PATH, config_data)
+                # 只更新磁盘配置里的备份状态，不能整份写回内存副本：
+                # 否则每次定时任务跑完自动备份，都会把刚写进去的 shareurl_ban 抹掉
+                disk = _read_disk_config()
+                if isinstance(disk, dict):
+                    dcb = disk.setdefault("cloud_backup", {})
+                    if isinstance(dcb, dict):
+                        dcb["last_backup"] = disp_ts
+                        dcb["last_result"] = "ok"
+                    Config.write_json(CONFIG_PATH, disk)
+                else:
+                    Config.write_json(CONFIG_PATH, config_data)
             except Exception:
                 pass
         logging.info(f">>> 云端备份成功（{reason}）：{remote}")
@@ -724,16 +796,11 @@ def get_share_detail():
         source_dir = url_subdir
     rs = account.list_share_all(url, pwd, source_dir)
     if not rs.get("ok"):
-        raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
         detail = Baidu.err_text(rs.get("raw"))
-        if "13003" in raw or "pwd" in raw.lower():
-            err = "该分享需要提取码或提取码错误，请补充提取码后重试"
-        elif "13004" in raw or "13000" in raw or "record not found" in raw:
-            err = "分享链接无效、已失效，或提取码错误，请检查链接和提取码"
-        elif detail and detail != rs.get("err", ""):
-            err = detail
+        if Baidu._looks_like_network_error(detail):
+            err = "网络异常，暂时无法检查分享链接，请稍后重试"
         else:
-            err = rs.get("err") or detail or raw[:200]
+            err = Baidu.share_err_hint(rs.get("raw"), detail)
         return jsonify({"success": False, "data": {"error": err}})
 
     entries = [_share_item_adapter(x, source_dir) for x in rs.get("list", [])]
@@ -902,7 +969,11 @@ def add_task():
             )
     if not request_data.get("addition"):
         request_data["addition"] = task_plugins_config_default
-    config_data["tasklist"].append(request_data)
+    disk = _fresh_config_base()
+    if not isinstance(disk, dict):
+        disk = config_data
+    disk.setdefault("tasklist", []).append(request_data)
+    config_data = disk
     Config.write_json(CONFIG_PATH, config_data)
     _fire_cloud_backup("add_task")
     logging.info(f">>> 通过API添加任务: {request_data['taskname']}")

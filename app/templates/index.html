@@ -525,6 +525,7 @@
           origin_savepath: "",
         },
         configModified: false,
+        syncingBan: false,
         fileSelect: {
           index: null,
           share: {},
@@ -557,6 +558,8 @@
       watch: {
         formData: {
           handler(newVal, oldVal) {
+            // 链接失效提醒是后台任务写回来的状态，不算用户的未保存修改
+            if (this.syncingBan) return;
             this.configModified = true;
           },
           deep: true
@@ -569,9 +572,13 @@
         $('[data-toggle="tooltip"]').tooltip();
         document.addEventListener('keydown', this.handleKeyDown);
         window.addEventListener('beforeunload', this.handleBeforeUnload);
+        window.addEventListener('focus', () => this.syncBanStatus());
+        // 定时任务跑在后台，定时同步一次失效提醒（只改 shareurl_ban 字段）
+        this.banTimer = setInterval(() => this.syncBanStatus(), 60000);
       },
       beforeDestroy() {
         window.removeEventListener('beforeunload', this.handleBeforeUnload);
+        if (this.banTimer) clearInterval(this.banTimer);
       },
       methods: {
         checkNewVersion() {
@@ -816,10 +823,11 @@
           axios.post('/get_share_detail', {
             shareurl: task.shareurl
           }).then(response => {
-            share_detail = response.data.data
+            const share_detail = (response.data && response.data.data) || {};
             if (!response.data.success) {
-              if (share_detail.error.includes("提取码")) {
-                const passcode = prompt("检查失败[" + share_detail.error + "]，请输入提取码：");
+              const errText = share_detail.error || '分享链接检查失败';
+              if (errText.includes("提取码")) {
+                const passcode = prompt("检查失败[" + errText + "]，请输入提取码：");
                 if (passcode != null) {
                   if (/([?&]pwd=)[^#&]*/.test(task.shareurl)) {
                     task.shareurl = task.shareurl.replace(/([?&]pwd=)[^#&]*/, `$1${passcode}`);
@@ -830,7 +838,8 @@
                   return;
                 }
               }
-              this.$set(task, "shareurl_ban", share_detail.error);
+              this.$set(task, "shareurl_ban", errText);
+              this.showToast(`《${task.taskname}》${errText}`, 'warning', 6000);
             } else if (share_detail.share && share_detail.share.title) {
               task.taskname = task.taskname == "" ? share_detail.share.title : task.taskname;
               task.savepath = this.fillTaskname(task.savepath, share_detail.share.title);
@@ -946,6 +955,9 @@
                     this.modalLoading = false;
                     if (task_index == null) {
                       this.fetchData();
+                    } else {
+                      // 单任务运行：同步失效状态，链接失效时运行按钮变黄色感叹号
+                      this.syncBanStatus(true);
                     }
                     break;
                   }
@@ -964,6 +976,36 @@
           } catch (error) {
             this.modalLoading = false;
             console.error('Error:', error);
+          }
+        },
+        // 把后台任务写回来的「链接失效」标记同步到页面：运行按钮会变成黄色感叹号
+        // notify=true 时对新增的失效任务弹一个提示（手动运行结束后用）
+        async syncBanStatus(notify = false) {
+          try {
+            const response = await axios.get('/data');
+            const list = (response.data && response.data.data && response.data.data.tasklist) || [];
+            const byKey = {};
+            list.forEach(t => { byKey[(t.shareurl || '').split('#')[0]] = t; });
+            this.syncingBan = true;
+            (this.formData.tasklist || []).forEach(task => {
+              const hit = byKey[(task.shareurl || '').split('#')[0]];
+              if (!hit) return;
+              if (hit.shareurl_ban && hit.shareurl_ban !== task.shareurl_ban) {
+                this.$set(task, 'shareurl_ban', hit.shareurl_ban);
+                this.$set(task, 'shareurl_ban_at', hit.shareurl_ban_at);
+                if (notify) {
+                  this.showToast(`《${task.taskname}》${hit.shareurl_ban}`, 'warning', 6000);
+                }
+              } else if (!hit.shareurl_ban && task.shareurl_ban) {
+                // 链接恢复可用了，提醒自动消失
+                this.$set(task, 'shareurl_ban', undefined);
+                this.$set(task, 'shareurl_ban_at', undefined);
+              }
+            });
+            this.$nextTick(() => { this.syncingBan = false; });
+          } catch (error) {
+            this.syncingBan = false;
+            console.error('Error syncBanStatus:', error);
           }
         },
         getParentDirectory(path) {
