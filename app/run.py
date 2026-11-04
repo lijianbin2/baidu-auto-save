@@ -78,6 +78,9 @@ TASK_TIMEOUT = int(os.environ.get("TASK_TIMEOUT", 1800))
 config_data = {}
 task_plugins_config_default = {}
 
+# 配置是「读-改-写」更新的：请求线程和备份线程可能同时改，进程内串行化避免互相覆盖
+_CONFIG_LOCK = threading.RLock()
+
 
 def _read_disk_config():
     """读取磁盘上的最新配置。
@@ -113,7 +116,8 @@ def _merge_task_ban_flags(tasks, disk_tasks):
 
     页面可能是在任务运行之前打开的，提交的任务列表里没有 shareurl_ban；
     直接覆盖会让刚检测到的失效提醒丢失，页面上的黄色感叹号就不显示了。
-    只在分享链接没变、且提交内容里没有该标记时才补，用户改了链接就让标记自然清掉。
+    只在分享链接没变、且提交内容里没带这个字段时才补：
+    用户改了链接、或页面把它显式置空（重新检查过），都算主动作废提醒。
     """
     if not isinstance(tasks, list) or not isinstance(disk_tasks, list):
         return 0
@@ -124,6 +128,12 @@ def _merge_task_ban_flags(tasks, disk_tasks):
     merged = 0
     for t in tasks:
         if not isinstance(t, dict) or t.get("shareurl_ban"):
+            continue
+        if "shareurl_ban" in t:
+            # 前端把它置成 null/空了 = 重新检查过、旧提醒作废（比如补了提取码），
+            # 尊重这个意图，别再用磁盘里的旧标记盖回来
+            t.pop("shareurl_ban", None)
+            t.pop("shareurl_ban_at", None)
             continue
         old = bans.get(t.get("shareurl"))
         if old is None:
@@ -250,23 +260,26 @@ def update():
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
     payload = request.json or {}
-    # 先同步磁盘上的最新配置（后台转存子进程会写回 shareurl_ban 等运行状态），
-    # 再叠加用户这次的修改，避免用旧的内存副本把刚检测到的失效提醒抹掉
-    config_data = _fresh_config_base()
-    if isinstance(payload.get("tasklist"), list):
-        _merge_task_ban_flags(payload["tasklist"], config_data.get("tasklist"))
-    allowed_keys = ["crontab", "push_config", "tasklist",
-                    "magic_regex", "plugins", "source", "cloud_backup", "schedule"]
-    for key, value in payload.items():
-        if key in allowed_keys:
-            config_data.update({key: value})
-    if isinstance(payload.get("schedule"), dict):
-        cron, err = build_crontab(payload["schedule"])
-        if err:
-            return jsonify({"success": False, "message": err})
-        config_data["schedule"] = payload["schedule"]
-        config_data["crontab"] = cron
-    Config.write_json(CONFIG_PATH, config_data)
+    if not isinstance(payload, dict):
+        payload = {}
+    with _CONFIG_LOCK:
+        # 先同步磁盘上的最新配置（后台转存子进程会写回 shareurl_ban 等运行状态），
+        # 再叠加用户这次的修改，避免用旧的内存副本把刚检测到的失效提醒抹掉
+        config_data = _fresh_config_base()
+        if isinstance(payload.get("tasklist"), list):
+            _merge_task_ban_flags(payload["tasklist"], config_data.get("tasklist"))
+        allowed_keys = ["crontab", "push_config", "tasklist",
+                        "magic_regex", "plugins", "source", "cloud_backup", "schedule"]
+        for key, value in payload.items():
+            if key in allowed_keys:
+                config_data.update({key: value})
+        if isinstance(payload.get("schedule"), dict):
+            cron, err = build_crontab(payload["schedule"])
+            if err:
+                return jsonify({"success": False, "message": err})
+            config_data["schedule"] = payload["schedule"]
+            config_data["crontab"] = cron
+        Config.write_json(CONFIG_PATH, config_data)
     if reload_tasks():
         logging.info(">>> 配置更新成功")
         _fire_cloud_backup("save")
@@ -573,15 +586,16 @@ def do_cloud_backup(reason=""):
             try:
                 # 只更新磁盘配置里的备份状态，不能整份写回内存副本：
                 # 否则每次定时任务跑完自动备份，都会把刚写进去的 shareurl_ban 抹掉
-                disk = _read_disk_config()
-                if isinstance(disk, dict):
-                    dcb = disk.setdefault("cloud_backup", {})
-                    if isinstance(dcb, dict):
-                        dcb["last_backup"] = disp_ts
-                        dcb["last_result"] = "ok"
-                    Config.write_json(CONFIG_PATH, disk)
-                else:
-                    Config.write_json(CONFIG_PATH, config_data)
+                with _CONFIG_LOCK:
+                    disk = _read_disk_config()
+                    if isinstance(disk, dict):
+                        dcb = disk.setdefault("cloud_backup", {})
+                        if isinstance(dcb, dict):
+                            dcb["last_backup"] = disp_ts
+                            dcb["last_result"] = "ok"
+                        Config.write_json(CONFIG_PATH, disk)
+                    else:
+                        logging.error(">>> 读取配置失败，跳过备份状态写回（避免覆盖运行状态）")
             except Exception:
                 pass
         logging.info(f">>> 云端备份成功（{reason}）：{remote}")
@@ -969,12 +983,13 @@ def add_task():
             )
     if not request_data.get("addition"):
         request_data["addition"] = task_plugins_config_default
-    disk = _fresh_config_base()
-    if not isinstance(disk, dict):
-        disk = config_data
-    disk.setdefault("tasklist", []).append(request_data)
-    config_data = disk
-    Config.write_json(CONFIG_PATH, config_data)
+    with _CONFIG_LOCK:
+        disk = _fresh_config_base()
+        if not isinstance(disk, dict):
+            disk = config_data
+        disk.setdefault("tasklist", []).append(request_data)
+        config_data = disk
+        Config.write_json(CONFIG_PATH, config_data)
     _fire_cloud_backup("add_task")
     logging.info(f">>> 通过API添加任务: {request_data['taskname']}")
     return jsonify({"success": True, "code": 0, "message": "任务添加成功", "data": request_data})

@@ -572,12 +572,16 @@
         $('[data-toggle="tooltip"]').tooltip();
         document.addEventListener('keydown', this.handleKeyDown);
         window.addEventListener('beforeunload', this.handleBeforeUnload);
-        window.addEventListener('focus', () => this.syncBanStatus());
+        this.onWindowFocus = () => this.syncBanStatus();
+        window.addEventListener('focus', this.onWindowFocus);
         // 定时任务跑在后台，定时同步一次失效提醒（只改 shareurl_ban 字段）
-        this.banTimer = setInterval(() => this.syncBanStatus(), 60000);
+        this.banTimer = setInterval(() => {
+          if (!document.hidden) this.syncBanStatus();
+        }, 60000);
       },
       beforeDestroy() {
         window.removeEventListener('beforeunload', this.handleBeforeUnload);
+        if (this.onWindowFocus) window.removeEventListener('focus', this.onWindowFocus);
         if (this.banTimer) clearInterval(this.banTimer);
       },
       methods: {
@@ -808,7 +812,9 @@
         changeShareurl(task) {
           if (!task.shareurl)
             return;
-          this.$set(task, "shareurl_ban", undefined);
+          // 显式置 null：表示「用户重新检查过，旧提醒先作废」，
+          // 保存时后端就不会再用磁盘里的旧失效标记把它盖回来
+          this.$set(task, "shareurl_ban", null);
           // 从URL中提取任务名
           try {
             const matches = decodeURIComponent(task.shareurl).match(/\/(\w{32})-([^\/]+)$/);
@@ -843,9 +849,9 @@
             } else if (share_detail.share && share_detail.share.title) {
               task.taskname = task.taskname == "" ? share_detail.share.title : task.taskname;
               task.savepath = this.fillTaskname(task.savepath, share_detail.share.title);
-              this.$set(task, "shareurl_ban", undefined);
+              this.$set(task, "shareurl_ban", null);
             } else {
-              this.$set(task, "shareurl_ban", undefined);
+              this.$set(task, "shareurl_ban", null);
             }
           }).catch(error => {
             console.error('Error get_share_detail:', error);
@@ -1136,7 +1142,7 @@
         },
         selectCurrentFolder(addTaskname = false) {
           if (this.fileSelect.selectShare) {
-            this.formData.tasklist[this.fileSelect.index].shareurl_ban = undefined;
+            this.formData.tasklist[this.fileSelect.index].shareurl_ban = null;
             this.formData.tasklist[this.fileSelect.index].shareurl = this.fileSelect.shareurl;
           } else {
             this.formData.tasklist[this.fileSelect.index].savepath = "/" + this.fileSelect.paths.map(item => item.name).join("/");
