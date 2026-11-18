@@ -1019,6 +1019,14 @@ class Baidu:
             print(f"⚠️ 目标目录 {self.show_path(savepath_rel)} 列表失败，本次跳过，下次重试")
             return tree
         dir_file_list = rd["list"]
+        if not dir_file_list and share_file_list:
+            # 本地像是空的但分享有内容：再直接列一次确认，避免把整库重复转存一遍
+            rd2 = self.ls_dir(savepath_rel)
+            if rd2.get("ok") and rd2.get("list"):
+                print("⚠️ 本地目录列表异常为空，重试后恢复正常")
+                rd = rd2
+                dir_file_list = rd2["list"]
+                self._ls_cache[savepath_rel] = dir_file_list
         dir_filename_list = [d["file_name"] for d in dir_file_list]
         root_id = f"root:{savepath_rel}"
         tree.create_node(self.show_path(savepath_rel), root_id, data={"is_dir": True})
