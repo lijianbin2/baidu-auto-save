@@ -997,37 +997,61 @@ def add_task():
 
 def run_python(args):
     logging.info(">>> 定时运行任务")
+    timed_out = {"flag": False}
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             f"{PYTHON_PATH} {args}",
             shell=True,
-            timeout=TASK_TIMEOUT,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
+            bufsize=1,
         )
-        if result.stdout:
-            for line in result.stdout.strip().split("\n"):
-                if line.strip():
-                    logging.info(line)
-        if result.returncode == 0:
-            logging.info(">>> 任务执行成功")
-        else:
-            logging.error(f">>> 任务执行失败，返回码: {result.returncode}")
-            if result.stderr:
-                logging.error(f"错误信息: {result.stderr[:500]}")
-    except subprocess.TimeoutExpired:
-        logging.error(f">>> 任务执行超时(>{TASK_TIMEOUT}s)，强制终止")
     except Exception as e:
-        logging.error(f">>> 任务执行异常: {str(e)}")
-        logging.error(traceback.format_exc())
-    finally:
+        logging.error(f">>> 定时任务启动失败: {e}")
         try:
             do_cloud_backup("schedule")
-        except Exception as e:
-            logging.error(f">>> 定时任务后自动备份失败：{e}")
-        logging.debug(">>> run_python 函数执行完成")
+        except Exception:
+            pass
+        return
+
+    def _kill():
+        timed_out["flag"] = True
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    killer = threading.Timer(TASK_TIMEOUT, _kill)
+    killer.daemon = True
+    killer.start()
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                logging.info(line)
+        proc.wait()
+    except Exception as e:
+        logging.error(f">>> 定时任务读取输出失败: {e}")
+    finally:
+        killer.cancel()
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+    if timed_out["flag"]:
+        logging.error(f">>> 任务执行超时(>{TASK_TIMEOUT}s)，强制终止")
+    elif proc.returncode == 0:
+        logging.info(">>> 任务执行成功")
+    else:
+        logging.error(f">>> 任务执行失败，返回码: {proc.returncode}")
+    try:
+        do_cloud_backup("schedule")
+    except Exception as e:
+        logging.error(f">>> 定时任务后自动备份失败：{e}")
+    logging.debug(">>> run_python 函数执行完成")
 
 
 def reload_tasks():

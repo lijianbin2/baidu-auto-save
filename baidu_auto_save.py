@@ -19,6 +19,7 @@ import shutil
 import urllib.parse
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 _WRITE_LOCK = threading.Lock()
 from datetime import datetime
@@ -353,6 +354,70 @@ class Baidu:
         self.vip_type = None
         self.savepath_cache = {}
         self._ls_cache = {}
+        self._share_cache = {}
+        try:
+            self._prefetch_workers = max(0, int(os.environ.get("PREFETCH_WORKERS", "3")))
+        except Exception:
+            self._prefetch_workers = 3
+        self._executor = None
+
+    def _pool(self):
+        """懒加载的预取线程池（bdpan 调用是 I/O 等待，并发能省掉大部分串行时间）"""
+        if self._prefetch_workers <= 0:
+            return None
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self._prefetch_workers)
+        return self._executor
+
+    def _prefetch_local(self, savepath_rel):
+        """把本地目录列表丢后台跑，和分享列表并发（结果由 _await_local 收）"""
+        pool = self._pool()
+        if pool is None or not savepath_rel or savepath_rel in self._ls_cache:
+            return None
+        try:
+            return pool.submit(self.ls_dir, savepath_rel)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _await_local(future):
+        try:
+            return future.result()
+        except Exception:
+            return None
+
+    def prefetch_dirs(self, share_url, pwd, items):
+        """并发预取一组子目录的分享列表 + 本地列表，结果写进缓存。
+
+        items: [(source_dir, savepath_rel), ...]
+        bdpan 每次调用要 1~3 秒，子目录多时串行扫描是大头；预取把这一段并行化。
+        失败不写缓存，主流程照原逻辑重试/判定，避免把瞬时错误当失效。
+        """
+        if not items or len(items) < 2:
+            return
+        pool = self._pool()
+        if pool is None:
+            return
+
+        def work(item):
+            source, rel = item
+            share = self.list_share_all(share_url, pwd, source)
+            local = None
+            if rel and rel not in self.savepath_cache:
+                local = self.ls_dir(rel)
+            return source, rel, share, local
+
+        try:
+            results = list(pool.map(work, items))
+        except Exception as e:
+            print(f"⚠️ 预取子目录失败：{e}")
+            return
+        for source, rel, share, local in results:
+            if isinstance(share, dict) and share.get("ok"):
+                self._share_cache[(share_url, pwd, source)] = share
+            if isinstance(local, dict) and local.get("ok"):
+                self._ls_cache[rel] = local["list"]
+                self.savepath_cache[rel] = True
 
     # ---------- 底层 ----------
     @staticmethod
@@ -433,6 +498,18 @@ class Baidu:
         return any(
             k in s
             for k in ("网络", "超时", "timeout", "timed out", "connection", "econn", "socket")
+        )
+
+    @staticmethod
+    def _looks_like_rate_limit(txt):
+        """请求过频也属于“下次再试”，不能当成链接失效去拉黑任务"""
+        if not txt:
+            return False
+        s = str(txt).lower()
+        return any(
+            k in s
+            for k in ("频繁", "请求过快", "稍后重试", "too many", "rate limit",
+                      "13071", "13072", "13073", "31034")
         )
 
     @staticmethod
@@ -690,6 +767,11 @@ class Baidu:
         return {"ok": True, "list": normed, "has_more": has_more, "raw": ret}
 
     def list_share_all(self, share_url, pwd="", source_dir=""):
+        # 同一次运行里同一个目录只列一次：预取和实际扫描共用这份缓存
+        key = (share_url, pwd, source_dir)
+        hit = self._share_cache.get(key)
+        if hit is not None:
+            return hit
         all_items = []
         first_raw = None
         page = 1
@@ -705,7 +787,9 @@ class Baidu:
             page += 1
             if page > 50:
                 break
-        return {"ok": True, "list": all_items, "has_more": False, "raw": first_raw}
+        result = {"ok": True, "list": all_items, "has_more": False, "raw": first_raw}
+        self._share_cache[key] = result
+        return result
 
     def transfer_select(self, share_url, fsids, pwd="", target_dir=""):
         if not fsids:
@@ -870,15 +954,21 @@ class Baidu:
     def dir_check_and_save(self, task, share_url, pwd, source_dir="", subdir_path=""):
         from treelib import Tree
         tree = Tree()
+        savepath_rel = re.sub(r"/{2,}", "/", f"/{task['savepath']}{subdir_path}").strip("/")
+        # 本地目录列表和分享列表互不依赖：先丢后台线程，跟分享列表并发拿
+        local_future = self._prefetch_local(savepath_rel)
         # 1. 分享侧列表
         rs = self.list_share_all(share_url, pwd, source_dir)
         if not rs["ok"]:
             raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
             detail = self.err_text(rs.get("raw"))
             if subdir_path == "":
-                # 网络抖动不算失效：不写失效标记，下次再试
+                # 网络抖动 / 请求过频都不算失效：不写失效标记，下次再试
                 if self._looks_like_network_error(detail) or self._looks_like_network_error(raw):
                     print(f"跳过任务：网络异常 {detail or raw[:200]}")
+                    return tree
+                if self._looks_like_rate_limit(detail) or self._looks_like_rate_limit(raw):
+                    print(f"跳过任务：请求过频，下次再试 {detail or raw[:200]}")
                     return tree
                 msg = self.share_err_hint(rs.get("raw"), detail)
                 print(f"❌《{task['taskname']}》分享检查失败：{detail or raw[:300]}")
@@ -911,8 +1001,12 @@ class Baidu:
                 # 子目录列表失败时直接跳过（下次重试），不要回退成整目录转存，否则会在 savepath 下套出一层同名目录
                 print(f"⚠️ 子目录 {sub_path} 列表失败，本次跳过，下次重试")
                 return tree
-        # 2. 目标目录
-        savepath_rel = re.sub(r"/{2,}", "/", f"/{task['savepath']}{subdir_path}").strip("/")
+        # 2. 目标目录（本地列表已在后台预取）
+        if local_future is not None:
+            local = self._await_local(local_future)
+            if isinstance(local, dict) and local.get("ok"):
+                self._ls_cache[savepath_rel] = local["list"]
+                self.savepath_cache[savepath_rel] = True
         if not self.ensure_dir(savepath_rel):
             print(f"❌ 目录 {self.show_path(savepath_rel)} 创建/检查失败，跳过")
             return tree
@@ -936,6 +1030,7 @@ class Baidu:
         mr.set_taskname(task.get("taskname", ""))
         pattern, replace = mr.magic_regex_conv(task.get("pattern", ""), task.get("replace", ""))
         need_save_list = []
+        recurse_list = []
         for share_file in share_file_list:
             search_pattern = task["update_subdir"] if share_file["dir"] and task.get("update_subdir") else pattern
             try:
@@ -978,20 +1073,27 @@ class Baidu:
                         need_save_list.append(share_file)
                 else:
                     sub_source = (share_file.get("path") or share_file["file_name"]).strip("/")
-                    print(f"检查子目录：{savepath_rel}/{share_file['file_name']}")
-                    sub_tree = self.dir_check_and_save(task, share_url, pwd, sub_source, f"/{subdir_path}/{share_file['file_name']}" if subdir_path else f"/{share_file['file_name']}")
-                    try:
-                        sub_size = sub_tree.size(1)
-                    except Exception:
-                        sub_size = 0
-                    if sub_size > 0:
-                        tree.create_node("📁" + share_file["file_name"], f"dir:{sub_source}", parent=root_id, data={"is_dir": True})
-                        try:
-                            tree.merge(f"dir:{sub_source}", sub_tree, deep=False)
-                        except Exception:
-                            pass
+                    sub_rel = f"/{subdir_path}/{share_file['file_name']}" if subdir_path else f"/{share_file['file_name']}"
+                    child_savepath = f"{savepath_rel}/{share_file['file_name']}".strip("/")
+                    recurse_list.append((share_file, sub_source, sub_rel, child_savepath))
             if share_file.get("fsid") == task.get("startfid", ""):
                 break
+        # 3.5 先把要递归的子目录的分享/本地列表并发预取回来，再逐个递归（递归里直接命中缓存）
+        if recurse_list:
+            self.prefetch_dirs(share_url, pwd, [(src, path) for _, src, _, path in recurse_list])
+            for share_file, sub_source, sub_rel, _child in recurse_list:
+                print(f"检查子目录：{savepath_rel}/{share_file['file_name']}")
+                sub_tree = self.dir_check_and_save(task, share_url, pwd, sub_source, sub_rel)
+                try:
+                    sub_size = sub_tree.size(1)
+                except Exception:
+                    sub_size = 0
+                if sub_size > 0:
+                    tree.create_node("📁" + share_file["file_name"], f"dir:{sub_source}", parent=root_id, data={"is_dir": True})
+                    try:
+                        tree.merge(f"dir:{sub_source}", sub_tree, deep=False)
+                    except Exception:
+                        pass
         if re.search(r"\{I+\}", replace or ""):
             try:
                 mr.set_dir_file_list([{"file_name": d["file_name"], "dir": d["dir"]} for d in dir_file_list], replace)
@@ -1050,22 +1152,14 @@ class Baidu:
         return tree
 
     def do_rename(self, tree, node_id=None):
+        # 遍历所有节点：子目录里转存的文件也要按正则改名（之前只看根节点直接子节点）
         try:
-            from treelib import Tree as _T
+            nodes = tree.all_nodes()
         except Exception:
             return
-        if node_id is None:
-            try:
-                node_id = tree.root
-            except Exception:
-                return
-        try:
-            children = tree.children(node_id)
-        except Exception:
-            return
-        for child in children:
-            file = child.data or {}
-            if file.get("is_dir"):
+        for node in nodes:
+            file = node.data or {}
+            if not isinstance(file, dict) or file.get("is_dir"):
                 continue
             if file.get("file_name_re") and file["file_name_re"] != file.get("file_name"):
                 save_dir = (file.get("path") or "").rsplit("/", 1)[0] if "/" in (file.get("path") or "") else ""
@@ -1128,19 +1222,30 @@ def do_save(account, tasklist=None):
             except Exception as e:
                 print(f"插件 {plugin_name} task_before 失败: {e}")
 
+    summary = {"tasks": 0, "transferred": 0, "failed": 0, "skipped": 0}
     for index, task in enumerate(tasklist or []):
         print()
         print(f"#{index+1}------------------")
         print(f"《{task.get('taskname')}》")
         if not is_time(task):
+            summary["skipped"] += 1
             print("⏭️ 未到执行时间/已到期，跳过")
             continue
+        task_started = time.time()
         try:
             is_new_tree = account.do_save_task(task)
         except Exception as e:
+            summary["failed"] += 1
             print(f"❌ 任务异常: {e}")
             traceback.print_exc()
+            print(f"⏱️ 本任务耗时 {time.time() - task_started:.1f}s")
             continue
+        summary["tasks"] += 1
+        try:
+            if is_new_tree:
+                summary["transferred"] += is_new_tree.size(1)
+        except Exception:
+            pass
         if is_new_tree:
             print("🧩 调用插件")
             for plugin_name, plugin in plugins.items():
@@ -1149,6 +1254,7 @@ def do_save(account, tasklist=None):
                         task = plugin.run(task, account=account, tree=is_new_tree) or task
                     except Exception as e:
                         print(f"插件 {plugin_name} run 失败: {e}")
+        print(f"⏱️ 本任务耗时 {time.time() - task_started:.1f}s")
     print()
     print("===============插件收尾===============")
     for plugin_name, plugin in plugins.items():
@@ -1162,6 +1268,21 @@ def do_save(account, tasklist=None):
             except Exception as e:
                 print(f"插件 {plugin_name} task_after 失败: {e}")
     print()
+    return summary
+
+
+def format_duration(seconds):
+    try:
+        sec = int(round(float(seconds or 0)))
+    except Exception:
+        sec = 0
+    if sec < 60:
+        return f"{sec} 秒"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m} 分 {s} 秒"
+    h, m = divmod(m, 60)
+    return f"{h} 小时 {m} 分"
 
 
 def main():
@@ -1210,7 +1331,7 @@ def main():
     account = Baidu()
     if not verify_account(account):
         return
-    do_save(account, CONFIG_DATA.get("tasklist", []))
+    summary = do_save(account, CONFIG_DATA.get("tasklist", [])) or {}
     # 回写 ban 标记等；单任务手动运行时任务列表来自环境变量，只含子集，
     # 此时只把 ban 标记合并回磁盘完整列表，绝不能整体覆盖
     if tasklist_from_env:
@@ -1233,13 +1354,24 @@ def main():
                 CONFIG_DATA["tasklist"] = disk["tasklist"]
         except Exception as e:
             print(f"合并回写配置失败: {e}")
+    duration = (datetime.now() - start_time).total_seconds()
+    # 运行结果给页面看（读写方都不改这个键，保存配置时会被保留）
+    CONFIG_DATA["runtime"] = {
+        "last_run": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "duration": round(duration, 1),
+        "text": f"{start_time.strftime('%m-%d %H:%M')} 运行，耗时 {format_duration(duration)}",
+        "tasks": summary.get("tasks", 0),
+        "transferred": summary.get("transferred", 0),
+        "failed": summary.get("failed", 0),
+        "skipped": summary.get("skipped", 0),
+    }
     try:
         Config.write_json(config_path, CONFIG_DATA)
     except Exception as e:
         print(f"回写配置失败: {e}")
     if NOTIFYS:
         send_ql_notify("【百度自动转存】", "\n\n".join(NOTIFYS))
-    print(f"===============程序结束（耗时 {(datetime.now()-start_time).total_seconds():.1f}s）===============")
+    print(f"===============程序结束（耗时 {duration:.1f}s）===============")
 
 
 if __name__ == "__main__":

@@ -111,6 +111,10 @@
               </div>
             </div>
             <p class="text-muted small">实际规则：<code>{{ cronPreview() }}</code>，保存后生效</p>
+            <p class="text-muted small mb-0" v-if="formData.runtime && formData.runtime.last_run">
+              <i class="bi bi-stopwatch"></i> 上次运行：{{ formData.runtime.last_run }}
+              <span v-if="formData.runtime.duration">（耗时 {{ formatDuration(formData.runtime.duration) }}<span v-if="formData.runtime.transferred">，转存 {{ formData.runtime.transferred }} 项</span><span v-if="formData.runtime.failed">，{{ formData.runtime.failed }} 个任务异常</span>）</span>
+            </p>
 
           </div>
 
@@ -1013,6 +1017,13 @@
             this.syncingBan = false;
             console.error('Error syncBanStatus:', error);
           }
+        },
+        formatDuration(seconds) {
+          const sec = Math.round(seconds || 0);
+          if (sec < 60) return sec + ' 秒';
+          const m = Math.floor(sec / 60);
+          if (m < 60) return m + ' 分 ' + (sec % 60) + ' 秒';
+          return Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分';
         },
         getParentDirectory(path) {
           parentDir = path.substring(0, path.lastIndexOf('/'))
