@@ -18,6 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import timedelta
 import subprocess
+import signal
 import requests
 import hashlib
 import logging
@@ -1008,6 +1009,7 @@ def run_python(args):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            start_new_session=True,
         )
     except Exception as e:
         logging.error(f">>> 定时任务启动失败: {e}")
@@ -1019,10 +1021,14 @@ def run_python(args):
 
     def _kill():
         timed_out["flag"] = True
+        # 杀整个进程组：只杀 shell 会把真正在跑的 python 子进程留在后台
         try:
-            proc.kill()
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     killer = threading.Timer(TASK_TIMEOUT, _kill)
     killer.daemon = True
@@ -1138,3 +1144,4 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
     )
+
