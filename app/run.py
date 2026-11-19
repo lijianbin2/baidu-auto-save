@@ -810,6 +810,12 @@ def get_share_detail():
     if not source_dir:
         source_dir = url_subdir
     rs = account.list_share_all(url, pwd, source_dir)
+    if not rs.get("ok") and source_dir:
+        # 链接里带的目录不在分享里（13042）：退回根目录，别把任务标成失效
+        if Baidu._looks_like_bad_source_dir(Baidu.err_text(rs.get("raw"))):
+            logging.info(f">>> 分享路径 {source_dir} 不在分享里，改用根目录")
+            source_dir = ""
+            rs = account.list_share_all(url, pwd, "")
     if not rs.get("ok"):
         detail = Baidu.err_text(rs.get("raw"))
         if Baidu._looks_like_network_error(detail):

@@ -487,6 +487,7 @@ class Baidu:
         "13016": "分享文件违规，已被屏蔽",
         "13017": "分享链接已失效",
         "13018": "分享链接已失效",
+        "13042": "分享链接里的目录不存在或已变化（已在根目录继续）",
         "-9": "分享链接已失效",
     }
 
@@ -511,6 +512,12 @@ class Baidu:
             for k in ("频繁", "请求过快", "稍后重试", "too many", "rate limit",
                       "13071", "13072", "13073", "31034")
         )
+
+    @staticmethod
+    def _looks_like_bad_source_dir(txt):
+        """13042：请求的子目录不在分享里（多半是链接里带了 #list/path=... 的旧路径）"""
+        s = str(txt or "").lower()
+        return "13042" in s or "prohibit list dir" in s
 
     @staticmethod
     def share_err_hint(raw, detail="", default="分享链接无效或已失效"):
@@ -703,7 +710,9 @@ class Baidu:
     def extract_share(url, task_pwd=""):
         url = _conv_share_init((url or "").strip())
         subdir = ""
-        mfrag = re.search(r"#list/path=(.*)$", url)
+        # 百度网页复制出来的链接是 #list/path=%2F&vmode=list 这种：
+        # path 只取到 & 之前，否则 &vmode=list 会被当成目录名（13042）
+        mfrag = re.search(r"#list/path=([^&]*)", url)
         if mfrag:
             try:
                 import urllib.parse as _up
@@ -959,6 +968,12 @@ class Baidu:
         local_future = self._prefetch_local(savepath_rel)
         # 1. 分享侧列表
         rs = self.list_share_all(share_url, pwd, source_dir)
+        if not rs["ok"] and subdir_path == "" and source_dir:
+            # 链接里带的目录不在分享里（13042）→ 退回根目录继续，别整任务判失效
+            if self._looks_like_bad_source_dir(self.err_text(rs.get("raw"))):
+                print(f"⚠️ 分享路径「{source_dir}」不在分享里，改用根目录继续")
+                source_dir = ""
+                rs = self.list_share_all(share_url, pwd, "")
         if not rs["ok"]:
             raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
             detail = self.err_text(rs.get("raw"))
@@ -969,6 +984,9 @@ class Baidu:
                     return tree
                 if self._looks_like_rate_limit(detail) or self._looks_like_rate_limit(raw):
                     print(f"跳过任务：请求过频，下次再试 {detail or raw[:200]}")
+                    return tree
+                if self._looks_like_bad_source_dir(detail) or self._looks_like_bad_source_dir(raw):
+                    print(f"⚠️ 分享目录不可用，本次跳过：{detail or raw[:200]}")
                     return tree
                 msg = self.share_err_hint(rs.get("raw"), detail)
                 print(f"❌《{task['taskname']}》分享检查失败：{detail or raw[:300]}")
