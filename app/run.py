@@ -82,6 +82,38 @@ task_plugins_config_default = {}
 # 配置是「读-改-写」更新的：请求线程和备份线程可能同时改，进程内串行化避免互相覆盖
 _CONFIG_LOCK = threading.RLock()
 
+# 当前是否有转存任务在跑（定时/手动共用），用来防并发和给页面显示状态
+_RUN_LOCK = threading.Lock()
+_RUN_STATE = {"running": False, "kind": "", "task": "", "started": 0.0}
+
+
+def _run_start(kind="", task=""):
+    """占用运行位；已有任务在跑（且没超时）就返回 False"""
+    now = time.time()
+    with _RUN_LOCK:
+        if _RUN_STATE["running"] and now - _RUN_STATE["started"] < TASK_TIMEOUT + 120:
+            return False
+        _RUN_STATE.update({"running": True, "kind": kind, "task": task, "started": now})
+        return True
+
+
+def _run_end():
+    with _RUN_LOCK:
+        _RUN_STATE.update({"running": False, "kind": "", "task": "", "started": 0.0})
+
+
+def _run_snapshot():
+    with _RUN_LOCK:
+        st = dict(_RUN_STATE)
+    # 进程异常退出时状态可能残留，超时就直接当作没在跑
+    if st["running"]:
+        elapsed = time.time() - st["started"]
+        if elapsed > TASK_TIMEOUT + 120:
+            st["running"] = False
+        else:
+            st["elapsed"] = int(elapsed)
+    return st
+
 
 def _read_disk_config():
     """读取磁盘上的最新配置。
@@ -260,6 +292,9 @@ def update():
     global config_data
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
+    if _run_snapshot().get("running"):
+        # 子进程结束时会整份回写配置，运行期间保存会被它覆盖，直接拒绝
+        return jsonify({"success": False, "message": "任务正在运行，等它结束再保存"}), 409
     payload = request.json or {}
     if not isinstance(payload, dict):
         payload = {}
@@ -294,47 +329,61 @@ def run_script_now():
         return jsonify({"success": False, "message": "未登录"})
     body = request.json or {}
     tasklist = body.get("tasklist", [])
+    task_name = tasklist[0].get("taskname", "") if tasklist else "全部任务"
+    if not _run_start("manual", task_name):
+        logging.warning(">>> 已有任务在运行，本次手动运行被拒绝")
+        return jsonify({"success": False, "message": "已有任务正在运行，请等它结束再试"}), 409
     command = [PYTHON_PATH, "-u", SCRIPT_PATH, CONFIG_PATH]
     logging.info(
         f">>> 手动运行任务 [{tasklist[0].get('taskname') if len(tasklist)>0 else 'ALL'}] 开始执行..."
     )
 
     def generate_output():
-        process_env = os.environ.copy()
-        process_env["PYTHONIOENCODING"] = "utf-8"
-        if body.get("baidu_test"):
-            process_env["BAIDU_TEST"] = "true"
-            process_env["TASKLIST"] = json.dumps(
-                body.get("tasklist", []), ensure_ascii=False
-            )
-            process_env["PUSH_CONFIG"] = json.dumps(
-                body.get("push_config", {}), ensure_ascii=False
-            )
-        if tasklist:
-            process_env["TASKLIST"] = json.dumps(tasklist, ensure_ascii=False)
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=process_env,
-        )
         try:
-            for line in iter(process.stdout.readline, ""):
-                logging.info(line.strip())
-                yield f"data: {line}\n\n"
-            yield "data: [DONE]\n\n"
+            process_env = os.environ.copy()
+            process_env["PYTHONIOENCODING"] = "utf-8"
+            if body.get("baidu_test"):
+                process_env["BAIDU_TEST"] = "true"
+                process_env["TASKLIST"] = json.dumps(
+                    body.get("tasklist", []), ensure_ascii=False
+                )
+                process_env["PUSH_CONFIG"] = json.dumps(
+                    body.get("push_config", {}), ensure_ascii=False
+                )
+            if tasklist:
+                process_env["TASKLIST"] = json.dumps(tasklist, ensure_ascii=False)
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=process_env,
+            )
+            try:
+                for line in iter(process.stdout.readline, ""):
+                    logging.info(line.strip())
+                    yield f"data: {line}\n\n"
+                yield "data: [DONE]\n\n"
+            finally:
+                process.stdout.close()
+                process.wait()
         finally:
-            process.stdout.close()
-            process.wait()
+            _run_end()
 
     return Response(
         stream_with_context(generate_output()),
         content_type="text/event-stream;charset=utf-8",
     )
+
+
+@app.route("/run_status")
+def run_status():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    return jsonify({"success": True, "data": _run_snapshot()})
 
 
 @app.route("/bdpan_auth_url")
@@ -667,6 +716,8 @@ def cloud_backup():
         return jsonify({"success": False, "message": "未登录"})
     action = ((request.json or {}).get("action") or "now").strip()
     if action == "restore":
+        if _run_snapshot().get("running"):
+            return jsonify({"success": False, "message": "任务正在运行，等它结束再恢复配置"})
         ok, msg = do_cloud_restore()
         return jsonify({"success": ok, "message": msg})
     if action == "status":
@@ -980,6 +1031,8 @@ def add_task():
     global config_data
     if not is_login():
         return jsonify({"success": False, "code": 1, "message": "未登录"}), 401
+    if _run_snapshot().get("running"):
+        return jsonify({"success": False, "code": 3, "message": "任务正在运行，等它结束再添加"}), 409
     request_data = request.json
     required_fields = ["taskname", "shareurl", "savepath"]
     for field in required_fields:
@@ -1004,6 +1057,16 @@ def add_task():
 
 def run_python(args):
     logging.info(">>> 定时运行任务")
+    if not _run_start("schedule", "定时任务"):
+        logging.warning(">>> 已有任务正在运行，跳过这次定时执行")
+        return
+    try:
+        _do_run_python(args)
+    finally:
+        _run_end()
+
+
+def _do_run_python(args):
     timed_out = {"flag": False}
     try:
         proc = subprocess.Popen(
