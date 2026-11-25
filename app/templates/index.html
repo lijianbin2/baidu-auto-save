@@ -78,14 +78,12 @@
                 {{ baiduLogin.authUrl ? "重新获取授权链接" : "登录百度网盘" }}
               </button>
               <div v-if="baiduLogin.authUrl" class="mt-3">
-                <p>1. 点击在新窗口打开百度授权页并确认：<a :href="baiduLogin.authUrl" target="_blank" class="btn btn-sm btn-outline-primary">去百度授权</a></p>
-                <p class="mb-1">2. 把百度显示的<b>授权码</b>粘到下面，点完成登录：</p>
-                <div class="input-group" style="max-width:560px">
-                  <input type="text" class="form-control" v-model="baiduLogin.code" placeholder="粘贴百度授权码">
-                  <div class="input-group-append">
-                    <button type="button" class="btn btn-success" @click="submitBaiduCode()" :disabled="!baiduLogin.code || baiduLogin.loading">完成登录</button>
-                  </div>
-                </div>
+                <p>1. 点「去百度授权」打开授权页，完成授权（页面显示“授权成功”即可）：<a :href="baiduLogin.authUrl" target="_blank" class="btn btn-sm btn-outline-primary">去百度授权</a></p>
+                <p class="mb-1">2. 回到本页，点下面按钮刷新登录状态：</p>
+                <button type="button" class="btn btn-success" @click="submitBaiduCode()" :disabled="baiduLogin.loading">
+                  <span v-if="baiduLogin.loading" class="spinner-border spinner-border-sm mr-1"></span>我已完成授权
+                </button>
+                <p class="text-muted small mt-2 mb-0">新版 bdpan 不用再粘贴授权码；授权链接有效期至 {{ baiduLogin.expiresAt || '—' }}。</p>
               </div>
             </div>
             <div class="row title">
@@ -515,7 +513,7 @@
         cloudBackupMsg: "",
         toasts: [],
         accountInfo: {},
-        baiduLogin: { authUrl: "", code: "", loading: false },
+        baiduLogin: { authUrl: "", expiresAt: "", code: "", loading: false },
         newTask: {
           taskname: "",
           shareurl: "",
@@ -737,6 +735,7 @@
             .then(response => {
               if (response.data.success) {
                 this.baiduLogin.authUrl = response.data.auth_url;
+                this.baiduLogin.expiresAt = response.data.expires_at || "";
                 window.open(response.data.auth_url, '_blank');
               } else {
                 this.showToast('获取授权链接失败：' + response.data.message, 'error');
@@ -750,17 +749,15 @@
             });
         },
         submitBaiduCode() {
-          if (!this.baiduLogin.code) return;
           this.baiduLogin.loading = true;
-          axios.post('/bdpan_login', { code: this.baiduLogin.code })
+          axios.post('/bdpan_login', {})
             .then(response => {
               if (response.data.success) {
                 this.showToast('百度网盘登录成功', 'success');
                 this.baiduLogin.authUrl = "";
-                this.baiduLogin.code = "";
                 this.fetchAccountInfo();
               } else {
-                this.showToast('登录失败：' + response.data.message, 'error');
+                this.showToast(response.data.message || '还没检测到授权，请先在浏览器里完成授权', 'warning');
               }
               this.baiduLogin.loading = false;
             })
@@ -1351,3 +1348,4 @@
 </body>
 
 </html>
+

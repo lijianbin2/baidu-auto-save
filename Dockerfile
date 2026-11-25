@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && pip install --no-cache-dir -r /app/requirements.txt
 
 # bdpan：版本号 pin 在 ARG，升级只改一行；直链 tar 包比 installer 快
-ARG BDPAN_VERSION=3.8.8
+ARG BDPAN_VERSION=3.9.0
 RUN ARCH=$(uname -m) \
  && if [ "$ARCH" = "x86_64" ]; then BDPAN_ARCH=amd64; else BDPAN_ARCH=arm64; fi \
  && curl -fsSL -o /tmp/bdpan.tgz https://issuecdn.baidupcs.com/issue/netdisk/ai-bdpan/linux/${BDPAN_VERSION}/bdpan-${BDPAN_VERSION}-linux-${BDPAN_ARCH}.tar.gz \
@@ -31,3 +31,4 @@ COPY . /app
 
 EXPOSE 5006
 CMD ["python", "./app/run.py"]
+

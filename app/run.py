@@ -394,16 +394,16 @@ def bdpan_auth_url():
     ret = account.get_auth_url()
     if not ret.get("ok"):
         return jsonify({"success": False, "message": ret.get("err", "获取授权链接失败")})
-    return jsonify({"success": True, "auth_url": ret["auth_url"]})
+    return jsonify({"success": True, "auth_url": ret["auth_url"], "expires_at": ret.get("expires_at", "")})
 
 
 @app.route("/bdpan_login", methods=["POST"])
 def bdpan_login():
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
-    code = (request.json or {}).get("code", "")
+    # bdpan 3.9 起：浏览器授权后，由任意业务命令领取结果（whoami 即领取）
     account = Baidu()
-    ret = account.login_with_code(code)
+    ret = account.finish_login()
     if not ret.get("ok"):
         return jsonify({"success": False, "message": ret.get("err", "登录失败")})
     return jsonify({"success": True, "message": "登录成功", "nickname": ret.get("nickname", "")})

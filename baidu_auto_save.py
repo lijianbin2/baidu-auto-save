@@ -34,6 +34,7 @@ except Exception:
 
 CONFIG_DATA = {}
 NOTIFYS = []
+AUTH_REQUIRED = False
 
 
 def send_ql_notify(title, body):
@@ -447,15 +448,24 @@ class Baidu:
             return {"_ok": False, "_err": err or f"bdpan 无输出，退出码={p.returncode}", "_code": p.returncode}
         try:
             data = json.loads(out)
-            if not isinstance(data, dict):
-                data = {"_list": data}
-            data["_ok"] = True
-            data["_code"] = p.returncode
-            if data.get("errno") is None and data.get("code") not in (None, 0):
-                data["errno"] = data.get("code")
-            return data
         except Exception:
-            return {"_ok": p.returncode == 0, "_raw": out, "_err": err, "_code": p.returncode}
+            # 前面可能混了版本提示等非 JSON 行：从第一个 { 开始再解析一次
+            idx = out.find("{")
+            data = None
+            if idx > 0:
+                try:
+                    data = json.loads(out[idx:])
+                except Exception:
+                    data = None
+            if data is None:
+                return {"_ok": p.returncode == 0, "_raw": out, "_err": err, "_code": p.returncode}
+        if not isinstance(data, dict):
+            data = {"_list": data}
+        data["_ok"] = True
+        data["_code"] = p.returncode
+        if data.get("errno") is None and data.get("code") not in (None, 0):
+            data["errno"] = data.get("code")
+        return data
 
     def run_raw(self, args, timeout=120):
         return self._run(args, timeout=timeout)
@@ -520,6 +530,30 @@ class Baidu:
         return "13042" in s or "prohibit list dir" in s
 
     @staticmethod
+    def _looks_like_auth_error(txt):
+        """授权失效/需要重新授权：这类错误不能当成链接失效去拉黑任务"""
+        s = str(txt or "").lower()
+        return any(
+            k in s
+            for k in ("安全须知", "授权前", "重新授权", "未登录", "登录失效",
+                      "authorization_required", "not authenticated", "unauthorized",
+                      "auth required", "please login", "token expired")
+        )
+
+    @staticmethod
+    def auth_state(ret):
+        """返回 True/False/None：None 表示旧版本没有明确字段，交给文本判断"""
+        if not isinstance(ret, dict):
+            return False
+        if ret.get("authenticated") is not None:
+            if not ret.get("authenticated"):
+                return False
+            return ret.get("has_valid_token") is not False
+        if ret.get("has_valid_token") is not None:
+            return bool(ret.get("has_valid_token"))
+        return None
+
+    @staticmethod
     def share_err_hint(raw, detail="", default="分享链接无效或已失效"):
         """把百度接口的错误码翻译成一句用户能看懂的话（用于失效提醒）"""
         try:
@@ -553,13 +587,16 @@ class Baidu:
         if not ret.get("_ok"):
             print(f"❌ bdpan whoami 失败：{ret.get('_err')}")
             return None
-        if ret.get("authenticated") is False or ret.get("has_valid_token") is False:
-            print("❌ 百度网盘未登录，请先在 WebUI 点「登录百度网盘」完成授权")
+        state = self.auth_state(ret)
+        if state is False:
+            print("❌ 百度网盘未登录或授权已失效，请先在 WebUI 点「登录百度网盘」完成授权")
             return None
         txt = json.dumps(ret, ensure_ascii=False)
-        if "未登录" in txt or ret.get("errno") not in (None, 0):
-            print("❌ 百度网盘未登录，请先在 WebUI 点「登录百度网盘」完成授权")
-            return None
+        if state is None:
+            # 旧版本没有 authenticated 字段：保持原来的文本判断
+            if "未登录" in txt or ret.get("errno") not in (None, 0):
+                print("❌ 百度网盘未登录，请先在 WebUI 点「登录百度网盘」完成授权")
+                return None
         self.is_active = True
         # whoami --json 含用户名与 vip 字段（不同版本字段名有差异，尽量兼容）
         for k in ("username", "user_name", "nickname", "name"):
@@ -843,17 +880,25 @@ class Baidu:
         return {"code": 0, "message": f"已删除 {len(paths)} 项"}
 
     def get_auth_url(self):
-        """获取百度授权链接（供 WebUI 一键登录）"""
-        ret = self._run(["login", "--get-auth-url", "--accept-disclaimer", "--json"], timeout=60)
-        if not ret.get("_ok"):
-            return {"ok": False, "err": str(ret.get("_err", "获取授权链接失败"))[:200]}
-        url = (ret.get("data") or {}).get("auth_url", "")
+        """获取百度授权链接（bdpan 3.9+：login 返回链接，浏览器授权后由下一条业务命令领取）"""
+        ret = self._run(["login", "--auth-confirmed", "--json"], timeout=60)
+        data = ret.get("data") if isinstance(ret.get("data"), dict) else {}
+        url = (data or {}).get("auth_url") or ret.get("auth_url") or ""
         if not url:
-            return {"ok": False, "err": "未获取到授权链接"}
-        return {"ok": True, "auth_url": url}
+            return {"ok": False, "err": str(self.err_text(ret, "获取授权链接失败"))[:200]}
+        return {"ok": True, "auth_url": url, "expires_at": (data or {}).get("expires_at", "")}
+
+    def finish_login(self):
+        """浏览器里完成授权后，用 whoami 领取授权结果（新版 CLI 会自动领取）"""
+        self.is_active = False
+        self.nickname = ""
+        info = self.verify()
+        if not info:
+            return {"ok": False, "err": "还没检测到授权：请先在浏览器里完成授权，再点一次「我已完成授权」"}
+        return {"ok": True, "nickname": self.nickname}
 
     def login_with_code(self, code):
-        """用授权码完成登录（授权码绝不记入日志）"""
+        """旧版授权码流程（bdpan 3.9 已停用，保留仅作兜底）"""
         code = (code or "").strip()
         if not code:
             return {"ok": False, "err": "授权码为空"}
@@ -977,6 +1022,12 @@ class Baidu:
         if not rs["ok"]:
             raw = json.dumps(rs.get("raw", {}), ensure_ascii=False)
             detail = self.err_text(rs.get("raw"))
+            if self._looks_like_auth_error(detail) or self._looks_like_auth_error(raw):
+                # 授权失效时所有任务都会失败，不能逐个拉黑；直接中断整次运行
+                global AUTH_REQUIRED
+                AUTH_REQUIRED = True
+                print(f"❌ 百度网盘授权失效，本次运行中断：{detail or raw[:200]}")
+                return tree
             if subdir_path == "":
                 # 网络抖动 / 请求过频都不算失效：不写失效标记，下次再试
                 if self._looks_like_network_error(detail) or self._looks_like_network_error(raw):
@@ -1250,6 +1301,10 @@ def do_save(account, tasklist=None):
 
     summary = {"tasks": 0, "transferred": 0, "failed": 0, "skipped": 0}
     for index, task in enumerate(tasklist or []):
+        if AUTH_REQUIRED:
+            print("⛔ 百度网盘授权失效，跳过剩余任务")
+            summary["skipped"] += len(tasklist) - index
+            break
         print()
         print(f"#{index+1}------------------")
         print(f"《{task.get('taskname')}》")
@@ -1312,7 +1367,8 @@ def format_duration(seconds):
 
 
 def main():
-    global CONFIG_DATA
+    global CONFIG_DATA, AUTH_REQUIRED
+    AUTH_REQUIRED = False
     start_time = datetime.now()
     print("===============程序开始===============")
     print(f"⏰ 执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1358,6 +1414,8 @@ def main():
     if not verify_account(account):
         return
     summary = do_save(account, CONFIG_DATA.get("tasklist", [])) or {}
+    if AUTH_REQUIRED:
+        add_notify("❌ 百度网盘授权已失效：请到 WebUI 点「登录百度网盘」重新授权，然后运行一次\n")
     # 回写 ban 标记等；单任务手动运行时任务列表来自环境变量，只含子集，
     # 此时只把 ban 标记合并回磁盘完整列表，绝不能整体覆盖
     if tasklist_from_env:
