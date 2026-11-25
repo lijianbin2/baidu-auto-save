@@ -56,52 +56,6 @@ def add_notify(text):
     return text
 
 
-def build_notify(start_time, summary, duration):
-    """把本次运行的提醒整理成「标题 + 摘要正文」，避免一堆重复行和超长消息"""
-    def clip(t, max_lines=15):
-        lines = t.split("\n")
-        if len(lines) <= max_lines + 1:
-            return t
-        return "\n".join(lines[:max_lines]) + f"\n…（共 {len(lines) - 1} 项，完整清单看面板）"
-
-    blocks = [clip(str(t).strip()) for t in NOTIFYS if str(t).strip()]
-    ok = sum(1 for t in blocks if t.startswith("✅"))
-    fail = sum(1 for t in blocks if t.startswith("❌"))
-    warn = sum(1 for t in blocks if t.startswith("⚠️"))
-    auth = sum(1 for t in blocks if t.startswith("👤"))
-
-    if fail or auth:
-        n = max(fail, auth)
-        title = f"❌ 百度转存：{n} 个任务异常" + (f"，{ok} 个有更新" if ok else "")
-    elif ok:
-        title = f"✅ 百度转存：{ok} 个任务有更新"
-    elif warn:
-        title = "⚠️ 百度转存：有提醒"
-    else:
-        title = "百度自动转存"
-
-    parts = [f"⏰ {start_time.strftime('%m-%d %H:%M')}"]
-    tasks = summary.get("tasks", 0)
-    if tasks:
-        parts.append(f"{tasks} 个任务")
-    transferred = summary.get("transferred", 0)
-    if transferred:
-        parts.append(f"转存 {transferred} 项")
-    if summary.get("failed"):
-        parts.append(f"失败 {summary['failed']} 个")
-    parts.append(f"耗时 {format_duration(duration)}")
-    body = "　".join(parts) + "\n\n" + "\n\n".join(blocks)
-
-    url = (CONFIG_DATA.get("public_url") or "").strip()
-    if url:
-        body += f"\n\n👉 打开面板：{url}"
-
-    limit = 3000
-    if len(body) > limit:
-        body = body[:limit].rstrip() + "\n\n…（内容过长已截断，完整日志请看面板）"
-    return title, body
-
-
 class Config:
     @staticmethod
     def read_json(config_path):
@@ -239,10 +193,20 @@ class MagicRename:
         "万",
     ]
 
-    def __init__(self, magic_regex={}, magic_variable={}):
-        self.magic_regex.update(magic_regex)
-        self.magic_variable.update(magic_variable)
+    def __init__(self, magic_regex=None, magic_variable=None):
+        # 每个实例必须有自己的映射；类属性默认值会在多处共享，造成任务间配置/状态串扰
+        self.magic_regex = dict(type(self).magic_regex)
+        self.magic_variable = {
+            k: list(v) if isinstance(v, list) else v
+            for k, v in type(self).magic_variable.items()
+        }
+        if magic_regex:
+            self.magic_regex.update(magic_regex)
+        if magic_variable:
+            self.magic_variable.update(magic_variable)
         self.dir_filename_dict = {}
+        self._is_exists_cache = {}
+        self._compiled_exists = {}
 
     def set_taskname(self, taskname):
         """设置任务名称"""
@@ -319,11 +283,12 @@ class MagicRename:
         filename_list = list(set(filename_list) | set(dir_filename_dict.values()))
         filename_list = natsorted(filename_list, key=self._custom_sort_key)
         filename_index = {}
-        for name in filename_list:
-            if name in dir_filename_dict.values():
+        existing_names = set(dir_filename_dict.values())
+        for position, name in enumerate(filename_list, 1):
+            if name in existing_names:
                 continue
-            i = filename_list.index(name) + 1
-            while i in dir_filename_dict.keys():
+            i = position
+            while i in dir_filename_dict:
                 i += 1
             dir_filename_dict[i] = name
             filename_index[name] = i
@@ -369,22 +334,30 @@ class MagicRename:
             # print(f"filename_list: {self.filename_list}")
 
     def is_exists(self, filename, filename_list, ignore_ext=False):
-        """判断文件是否存在，处理忽略扩展名"""
-        # print(f"filename: {filename} filename_list: {filename_list}")
+        """判断文件是否存在，处理忽略扩展名；大目录用集合索引加速"""
         if ignore_ext:
             filename = os.path.splitext(filename)[0]
-            filename_list = [os.path.splitext(f)[0] for f in filename_list]
-        # {I+} 模式，用I通配数字序号
-        if match := re.search(r"\{I+\}", filename):
-            magic_i = match.group()
-            pattern_i = r"\d" * magic_i.count("I")
-            pattern = re.escape(filename).replace(re.escape(magic_i), pattern_i)
-            for filename in filename_list:
-                if re.match(pattern, filename):
-                    return filename
-            return None
+        key = (filename, bool(ignore_ext), tuple(filename_list))
+        cached = self._is_exists_cache.get(key)
+        if cached is not None or key in self._is_exists_cache:
+            return cached
+        if "{I" not in filename:
+            names = (os.path.splitext(f)[0] for f in filename_list) if ignore_ext else filename_list
+            found = filename if filename in set(names) else None
         else:
-            return filename if filename in filename_list else None
+            magic_i = re.search(r"\{I+\}", filename).group()
+            compiled = self._compiled_exists.get(filename)
+            if compiled is None:
+                width = magic_i.count("I")
+                prefix, suffix = filename.split(magic_i, 1)
+                digits = len(prefix) + width
+                compiled = re.compile("^" + re.escape(prefix) + "[0-9]{" + str(width) + "}" + re.escape(suffix))
+                self._compiled_exists[filename] = compiled
+            found = next((name for name in filename_list if len(name) >= digits and compiled.match(name)), None)
+        if len(self._is_exists_cache) >= 512:
+            self._is_exists_cache.clear()
+        self._is_exists_cache[key] = found
+        return found
 
 
 
@@ -1500,8 +1473,7 @@ def main():
             print(f"#《{task.get('taskname')}》转存测试")
             account.do_save_check(task.get("shareurl", ""), task.get("savepath", ""), task.get("pwd", ""))
         if NOTIFYS:
-            title, body = build_notify(start_time, {}, (datetime.now() - start_time).total_seconds())
-            send_ql_notify(title, body)
+            send_ql_notify("【百度自动转存】", "\n\n".join(NOTIFYS))
         return
     if not CONFIG_DATA.get("tasklist"):
         print("⚠️ 任务列表为空，请先配置 baidu_config.json")
@@ -1550,8 +1522,7 @@ def main():
     except Exception as e:
         print(f"回写配置失败: {e}")
     if NOTIFYS:
-        title, body = build_notify(start_time, summary, duration)
-        send_ql_notify(title, body)
+        send_ql_notify("【百度自动转存】", "\n\n".join(NOTIFYS))
     print(f"===============程序结束（耗时 {duration:.1f}s）===============")
 
 

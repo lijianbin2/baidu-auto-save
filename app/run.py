@@ -315,11 +315,6 @@ def update():
                 return jsonify({"success": False, "message": err})
             config_data["schedule"] = payload["schedule"]
             config_data["crontab"] = cron
-        # 记下用户实际访问地址，推送消息里带上面板链接
-        try:
-            config_data["public_url"] = (request.host_url or "").rstrip("/")
-        except Exception:
-            pass
         Config.write_json(CONFIG_PATH, config_data)
     if reload_tasks():
         logging.info(">>> 配置更新成功")
@@ -833,23 +828,40 @@ def _conv_share_init(url):
         return url
 
 
+_TITLE_CACHE = {}
+_TITLE_CACHE_LOCK = threading.Lock()
+_TITLE_CACHE_TTL = 86400
+
+
 def _shorturl_title(url):
-    """调百度 shorturlinfo 接口拿分享标题（无须登录，最干净）"""
+    """调百度 shorturlinfo 接口拿分享标题（无须登录）；缓存 1 天，避免重复请求"""
     try:
         m = re.search(r"/s/([A-Za-z0-9_\-]+)", _conv_share_init(url or ""))
         if not m:
             return ""
-        api = "https://pan.baidu.com/api/shorturlinfo?shorturl=" + m.group(1) + "&root=1"
+        shorturl = m.group(1)
+        with _TITLE_CACHE_LOCK:
+            hit = _TITLE_CACHE.get(shorturl)
+            if hit and time.time() - hit[0] < _TITLE_CACHE_TTL:
+                return hit[1]
+        api = "https://pan.baidu.com/api/shorturlinfo?shorturl=" + shorturl + "&root=1"
         req = urllib.request.Request(api, headers={
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://pan.baidu.com/",
         })
         with urllib.request.urlopen(req, timeout=8) as r:
             d = json.loads(r.read().decode("utf-8", "ignore"))
-        if not isinstance(d, dict) or d.get("errno") not in (None, 0):
-            return ""
-        t = (d.get("title") or "").strip()
-        return t if len(t) >= 2 else ""
+        title = ""
+        if isinstance(d, dict) and d.get("errno") in (None, 0):
+            title = (d.get("title") or "").strip()
+            title = title if len(title) >= 2 else ""
+        with _TITLE_CACHE_LOCK:
+            if len(_TITLE_CACHE) >= 512:
+                now = time.time()
+                for key in [k for k, v in _TITLE_CACHE.items() if now - v[0] >= _TITLE_CACHE_TTL]:
+                    _TITLE_CACHE.pop(key, None)
+            _TITLE_CACHE[shorturl] = (time.time(), title)
+        return title
     except Exception:
         return ""
 
