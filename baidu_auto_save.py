@@ -56,6 +56,52 @@ def add_notify(text):
     return text
 
 
+def build_notify(start_time, summary, duration):
+    """把本次运行的提醒整理成「标题 + 摘要正文」，避免一堆重复行和超长消息"""
+    def clip(t, max_lines=15):
+        lines = t.split("\n")
+        if len(lines) <= max_lines + 1:
+            return t
+        return "\n".join(lines[:max_lines]) + f"\n…（共 {len(lines) - 1} 项，完整清单看面板）"
+
+    blocks = [clip(str(t).strip()) for t in NOTIFYS if str(t).strip()]
+    ok = sum(1 for t in blocks if t.startswith("✅"))
+    fail = sum(1 for t in blocks if t.startswith("❌"))
+    warn = sum(1 for t in blocks if t.startswith("⚠️"))
+    auth = sum(1 for t in blocks if t.startswith("👤"))
+
+    if fail or auth:
+        n = max(fail, auth)
+        title = f"❌ 百度转存：{n} 个任务异常" + (f"，{ok} 个有更新" if ok else "")
+    elif ok:
+        title = f"✅ 百度转存：{ok} 个任务有更新"
+    elif warn:
+        title = "⚠️ 百度转存：有提醒"
+    else:
+        title = "百度自动转存"
+
+    parts = [f"⏰ {start_time.strftime('%m-%d %H:%M')}"]
+    tasks = summary.get("tasks", 0)
+    if tasks:
+        parts.append(f"{tasks} 个任务")
+    transferred = summary.get("transferred", 0)
+    if transferred:
+        parts.append(f"转存 {transferred} 项")
+    if summary.get("failed"):
+        parts.append(f"失败 {summary['failed']} 个")
+    parts.append(f"耗时 {format_duration(duration)}")
+    body = "　".join(parts) + "\n\n" + "\n\n".join(blocks)
+
+    url = (CONFIG_DATA.get("public_url") or "").strip()
+    if url:
+        body += f"\n\n👉 打开面板：{url}"
+
+    limit = 3000
+    if len(body) > limit:
+        body = body[:limit].rstrip() + "\n\n…（内容过长已截断，完整日志请看面板）"
+    return title, body
+
+
 class Config:
     @staticmethod
     def read_json(config_path):
@@ -1454,7 +1500,8 @@ def main():
             print(f"#《{task.get('taskname')}》转存测试")
             account.do_save_check(task.get("shareurl", ""), task.get("savepath", ""), task.get("pwd", ""))
         if NOTIFYS:
-            send_ql_notify("【百度自动转存】", "\n\n".join(NOTIFYS))
+            title, body = build_notify(start_time, {}, (datetime.now() - start_time).total_seconds())
+            send_ql_notify(title, body)
         return
     if not CONFIG_DATA.get("tasklist"):
         print("⚠️ 任务列表为空，请先配置 baidu_config.json")
@@ -1503,7 +1550,8 @@ def main():
     except Exception as e:
         print(f"回写配置失败: {e}")
     if NOTIFYS:
-        send_ql_notify("【百度自动转存】", "\n\n".join(NOTIFYS))
+        title, body = build_notify(start_time, summary, duration)
+        send_ql_notify(title, body)
     print(f"===============程序结束（耗时 {duration:.1f}s）===============")
 
 

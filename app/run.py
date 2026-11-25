@@ -315,6 +315,11 @@ def update():
                 return jsonify({"success": False, "message": err})
             config_data["schedule"] = payload["schedule"]
             config_data["crontab"] = cron
+        # 记下用户实际访问地址，推送消息里带上面板链接
+        try:
+            config_data["public_url"] = (request.host_url or "").rstrip("/")
+        except Exception:
+            pass
         Config.write_json(CONFIG_PATH, config_data)
     if reload_tasks():
         logging.info(">>> 配置更新成功")
