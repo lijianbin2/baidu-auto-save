@@ -69,6 +69,12 @@
               ✅ 已登录：<b>{{ accountInfo.nickname || "百度网盘" }}</b>
               <span v-if="accountInfo.vip_type">（{{ accountInfo.vip_type }}）</span>
               <br><small>保存根目录：{{ accountInfo.save_root }}　登录态保存在 config/.bdpan/，重建容器不掉</small>
+              <br><small v-if="accountInfo.days_left !== null && accountInfo.days_left !== undefined"
+                        :class="accountInfo.days_left < 7 ? 'text-danger font-weight-bold' : 'text-muted'">
+                <i class="bi bi-key"></i> 授权剩余 {{ Math.max(0, Math.floor(accountInfo.days_left)) }} 天
+                <span v-if="accountInfo.expires_at">（{{ accountInfo.expires_at.slice(0, 10) }} 到期）</span>
+                <span v-if="accountInfo.days_left < 7">，到期前请重新授权，否则会停止转存</span>
+              </small>
               <button type="button" class="btn btn-sm btn-outline-danger ml-2" @click="baiduLogout()">退出登录</button>
             </div>
             <div v-else>

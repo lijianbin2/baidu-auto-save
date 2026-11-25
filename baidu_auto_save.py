@@ -353,6 +353,8 @@ class Baidu:
         self.is_active = False
         self.nickname = ""
         self.vip_type = None
+        self.token_expires_at = ""
+        self.token_days_left = None
         self.savepath_cache = {}
         self._ls_cache = {}
         self._share_cache = {}
@@ -610,8 +612,26 @@ class Baidu:
                     self.nickname = str(data[k])
                     break
         self.vip_type = ret.get("vip_type", (ret.get("data") or {}).get("vip_type") if isinstance(ret.get("data"), dict) else None)
-        print(f"👤 百度账号: {self.nickname or '已登录'} (vip_type={self.vip_type})✅")
+        # 授权有效期（30 天）：到期前提醒 + 页面展示剩余天数
+        self.token_expires_at = ret.get("expires_at") or ""
+        self.token_days_left = self._days_left(self.token_expires_at)
+        extra = ""
+        if self.token_days_left is not None:
+            extra = f"，授权剩余 {self.token_days_left:.0f} 天"
+        print(f"👤 百度账号: {self.nickname or '已登录'} (vip_type={self.vip_type}){extra}✅")
         return ret
+
+    @staticmethod
+    def _days_left(expires_at):
+        try:
+            s = str(expires_at or "").strip()
+            if not s or s.startswith("0001"):
+                return None
+            exp = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            now = datetime.now(exp.tzinfo) if exp.tzinfo else datetime.now()
+            return max(0.0, (exp - now).total_seconds() / 86400.0)
+        except Exception:
+            return None
 
     # ---------- 路径 ----------
     @staticmethod
@@ -1253,7 +1273,35 @@ def verify_account(account):
     if not info:
         add_notify("👤 百度账号登录失败，请先登录❌")
         return False
+    update_auth_info(account)
     return True
+
+
+def update_auth_info(account, remind=True):
+    """记录授权有效期；剩 7 天起每天提醒一次（bdpan 不能自动续期，只能人工重新授权）"""
+    days = getattr(account, "token_days_left", None)
+    if days is None:
+        return
+    ai = CONFIG_DATA.get("auth_info")
+    if not isinstance(ai, dict):
+        ai = {}
+    exp = getattr(account, "token_expires_at", "")
+    ai.update({
+        "expires_at": exp,
+        "days_left": round(days, 1),
+        "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+    if remind and days < 7:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if ai.get("last_remind") != today:
+            exp_show = str(exp)[:10] if exp else "即将"
+            add_notify(
+                f"⚠️ 百度网盘授权还剩 {days:.0f} 天（{exp_show} 到期）。\n"
+                "bdpan 不能自动续期，到期前请在 WebUI 点「登录百度网盘」重新授权一次，"
+                "否则到期后定时任务会停止转存。\n"
+            )
+            ai["last_remind"] = today
+    CONFIG_DATA["auth_info"] = ai
 
 
 def format_bytes(size_bytes):

@@ -462,6 +462,8 @@ def account_info():
             "active": bool(info),
             "nickname": account.nickname if info else "",
             "vip_type": account.vip_type if info else None,
+            "expires_at": getattr(account, "token_expires_at", "") if info else "",
+            "days_left": getattr(account, "token_days_left", None) if info else None,
             "save_root": "我的应用数据/bdpan/",
             "login_hint": "docker exec -it baidu-auto-save bdpan login",
         },
