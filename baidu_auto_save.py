@@ -889,7 +889,8 @@ class Baidu:
         return {"ok": True, "auth_url": url, "expires_at": (data or {}).get("expires_at", "")}
 
     def finish_login(self):
-        """浏览器里完成授权后，用 whoami 领取授权结果（新版 CLI 会自动领取）"""
+        """浏览器里完成授权后，用 login 领取授权结果（3.9 起 whoami 不会触发领取），再确认状态"""
+        self._run(["login", "--auth-confirmed", "--json"], timeout=60)
         self.is_active = False
         self.nickname = ""
         info = self.verify()
